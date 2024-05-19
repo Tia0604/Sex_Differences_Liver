@@ -1,0 +1,359 @@
+---
+title: Preprocess the Seurat Object
+author: Tianze Cao
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+options(future.globals.maxSize= 10000*1024^2)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(dplyr)
+  library(magrittr)
+  library(kableExtra)
+  library(patchwork)
+  load("data/processed_data/guilliams_liver/cellType_20240513.RData")
+})
+```
+
+## Set input file
+```{r}
+input <- "data/processed_data/guilliams_liver/standardized_3m3f_20240513.rds"
+se <- readRDS(input)
+#to fix issue with normalization caused by gene names
+sce <- as.SingleCellExperiment(se)
+se <- as.Seurat(sce)
+```
+
+# Processing standarded data
+## Normalization
+```{r message=FALSE}
+if ("project_id" %in% colnames(se@meta.data)) {
+  data.list <- SplitObject(se, split.by = "project_id")
+  data.list <- lapply(data.list, function(x) SCTransform(x, verbose = FALSE))
+  
+  features <- SelectIntegrationFeatures(object.list = data.list, nfeatures = 3000)
+  data.list <- PrepSCTIntegration(object.list = data.list, anchor.features = features, verbose = FALSE)
+  
+  # Integration step for projects
+  anchors <- FindIntegrationAnchors(object.list = data.list, normalization.method = "SCT",
+                                    anchor.features = features, verbose = FALSE)
+  
+  data <- IntegrateData(anchorset = anchors, normalization.method = "SCT", verbose = FALSE)
+  
+  data <- RunPCA(data, verbose = FALSE)
+  data <- RunUMAP(data, reduction = "pca", dims = 1:30)
+  
+  group_var <- "project_id"
+} else {
+  # Alternative workflow for non-project data
+  data <- NormalizeData(se,verbose = F)
+  data <- FindVariableFeatures(data,verbose=F)
+  data <- ScaleData(data,verbose=F)
+  data <- RunPCA(data, features =VariableFeatures(data))
+  group_var <- "simp_sample_id"
+}
+```
+
+### Integration result (skipped for one project)
+```{r fig.width=8, fig.height=8}
+if ("project_id" %in% colnames(data@meta.data)) {
+  p1 <- DimPlot(data, reduction = "pca", dims = c(1,2), group.by = group_var, split.by = "sex")
+  p2 <- ElbowPlot(data, reduction = "pca", ndims = 50)
+
+  p1/p2
+}
+```
+
+```{r fig.width=10, fig.height=12, eval=FALSE}
+if ("project_id" %in% colnames(data@meta.data)) {
+  VlnPlot(combied, features = paste0("PC_", 1:16), pt.size = 0, group.by = group_var)
+}
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=10, fig.height=12, echo=FALSE, eval=TRUE}
+    if ("project_id" %in% colnames(data@meta.data)) {
+      VlnPlot(data, features = paste0("PC_", 1:16), pt.size = 0, group.by = group_var)
+    }
+    ```
+</details>
+
+```{r fig.width=8, fig.height=16}
+if ("project_id" %in% colnames(data@meta.data)) {
+  p1 <- DimPlot(data, reduction = "umap", group.by = "cell_type", label = TRUE) + theme(legend.position = "bottom")
+  p2 <- DimPlot(data, reduction = "umap", group.by = "simp_cell_type", label = TRUE) + theme(legend.position = "bottom")
+  
+  p1/p2
+}
+```
+
+## Dimensionality reduction
+### Run PCA
+```{r message=FALSE}
+data <- RunPCA(data, features =VariableFeatures(data))
+```
+
+#### Examine components
+```{r fig.width=8, fig.height=8}
+p1 <- DimPlot(data, reduction = "pca", dims = c(1,2), group.by = group_var, split.by = "sex")
+p2 <- ElbowPlot(data, reduction = "pca", ndims = 30)
+
+p1/p2
+```
+
+```{r fig.width=10, fig.height=12, eval=FALSE}
+VlnPlot(data, features = paste0("PC_", 1:16), pt.size = 0, group.by = group_var)
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=10, fig.height=12, echo=FALSE, eval=TRUE}
+    VlnPlot(data, features = paste0("PC_", 1:16), pt.size = 0, group.by = group_var)
+    ```
+</details>
+
+### Run harmony
+#### Set groups to harmonize
+```{r}
+groups <- c("sample_id")
+theta.use <- 1
+
+data <- harmony::RunHarmony(data, group.by.vars=groups, theta =theta.use,  
+                      plot_convergence = TRUE, verbose = FALSE)
+```
+
+#### Examine components
+```{r fig.width=8, fig.height=8}
+if (length(groups) > 0) {
+  p1 <- DimPlot(data, reduction = "harmony", group.by = group_var, split.by = "sex")
+  p2 <- ElbowPlot(data, reduction = "harmony", ndims = 60)
+  
+  p1/p2
+}
+```
+
+test
+```{r fig.width=16, fig.height=21, eval=FALSE}
+harmony_components <- seq(1, 28, by = 2)
+plot_list <- list()
+
+for (i in harmony_components) {
+  plot <- DimPlot(data, reduction = "harmony", dims = c(i,(i+1)),
+                  group.by = groups, split.by = group_var)
+  plot_list[[paste("Harmony", i)]] <- plot
+}
+cowplot::plot_grid(plotlist=plot_list, ncol = 2)
+#VlnPlot(data, features = paste0("harmony_", c(3,4,5,6,9,10,13,14,15,16,19,20)), pt.size = 0, group.by = group_var)
+```
+
+
+## Clustering
+### Set reduction, dims
+TODO: issue with knitting clustree plot
+```{r fig.width=12, fig.height=8, message=FALSE}
+reduction <- "harmony"
+dims <- c(1:3,7:9,11:13,16:18,20:28)
+
+data <- FindNeighbors(data, reduction = reduction, dims = dims, graph.name = paste0("RNA_snn_harmony_theta", theta.use, ".PC", max(dims)), verbose = FALSE)
+for (i in seq(0, 1, 0.1)) {
+  data <- FindClusters(data, resolution = i, graph.name = paste0("RNA_snn_harmony_theta", theta.use, ".PC", max(dims)), verbose = FALSE)
+}
+
+#has problem to knit
+#clustree::clustree(data, prefix = paste0("RNA_snn_harmony_theta", theta.use, ".PC", max(dims), "_res."))
+```
+
+### Set resolution
+```{r fig.width=8, fig.height=8, message=FALSE}
+resolution <- 0.6
+
+data <- FindClusters(data, resolution = resolution, graph.name = paste0("RNA_snn_harmony_theta", theta.use, ".PC", max(dims)), verbose = FALSE)
+data <- RunUMAP(data, reducton = reduction, dims = dims, verbose = FALSE)
+
+DimPlot(data, reduction = "umap", group.by = "seurat_clusters", label = TRUE) + theme(legend.position = "bottom")
+```
+
+# Cell type annotation
+## UMAP plots
+```{r}
+data$cell_type <- factor(data$cell_type, levels=ct_order)
+data$simp_cell_type <- factor(data$simp_cell_type, levels=simp_ct_order)
+```
+
+### Include unclassified immune cells (skipped if all are classified)
+```{r fig.width=8, fig.height=16, eval=FALSE}
+if ("Immune unclassified" %in% data$simp_cell_type){
+  p1 <- DimPlot(data, reduction = "umap", group.by = "cell_type", label = TRUE) + theme(legend.position = "bottom")
+  p2 <- DimPlot(data, reduction = "umap", group.by = "simp_cell_type", label = TRUE) + theme(legend.position = "bottom")
+  
+  p1/p2
+}
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=8, fig.height=16, echo=FALSE, eval=TRUE}
+    if ("Immune unclassified" %in% data$simp_cell_type){
+      p1 <- DimPlot(data, reduction = "umap", group.by = "cell_type", label = TRUE) + theme(legend.position = "bottom")
+      p2 <- DimPlot(data, reduction = "umap", group.by = "simp_cell_type", label = TRUE) + theme(legend.position = "bottom")
+      
+      p1/p2
+    }
+    ```
+</details>
+
+### Exclude unclassified immune cells
+```{r fig.width=12, fig.height=24}
+if ("Immune unclassified" %in% data$simp_cell_type){
+  classified <- subset(data, simp_cell_type != "Immune unclassified")
+  
+  p1 <- DimPlot(classified, reduction = "umap", group.by = "cell_type", label = TRUE) + theme(legend.position = "bottom")
+  p2 <- DimPlot(classified, reduction = "umap", group.by = "simp_cell_type", label = TRUE) + theme(legend.position = "bottom")
+  
+  p1/p2
+} else {
+  umap <- DimPlot(data, reduction = "umap", group.by = "cell_type", cols = ct_colors, label = TRUE) + theme(legend.position = "bottom") + labs(title = NULL)
+  p2 <- DimPlot(data, reduction = "umap", group.by = "simp_cell_type", cols = simp_ct_colors, label = TRUE) + theme(legend.position = "bottom") + labs(title = NULL)
+  
+  umap/p2
+}
+```
+
+## Marker genes
+### Cluster markers
+```{r}
+Idents(data) <- "seurat_clusters"
+```
+
+```{r message=FALSE}
+clusters.markers <- FindAllMarkers(data, only.pos = TRUE)
+clusters.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> clusters.top10
+```
+
+```{r eval=TRUE}
+clusters.top10 <- read.csv("data/processed_data/guilliams_liver/top10markers_Clusters_20240516.csv")
+```
+
+```{r}
+kbl(clusters.top10) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+```{r fig.width=18, fig.height=18}
+#downsample due to https://github.com/satijalab/seurat/issues/2724
+DoHeatmap(subset(data, downsample = 500), features = clusters.top10$gene) + NoLegend()
+```
+
+### Cell type markers
+```{r}
+Idents(data) <- "cell_type"
+```
+
+```{r message=FALSE}
+cts.top10 <- data.frame()
+
+for (ct in unique(data$cell_type)) {
+  # Replace blank spaces with underscores in the cell type string
+  ct_name <- gsub(" ", "_", as.character(ct))
+  
+  ct.markers <- FindMarkers(data, ident.1 = ct, only.pos = TRUE) %>%
+    mutate(cell_type = ct_name) %>%
+    mutate(gene = rownames(.))
+  
+  ct.top10.markers <- ct.markers %>% 
+    top_n(n = 10, wt = avg_log2FC)
+
+  #save result to one dataframe cts.top10
+  cts.top10 <- bind_rows(cts.top10, ct.top10.markers)
+}
+
+cts.top10$cell_type <- gsub("_", " ", as.character(cts.top10$cell_type))
+cts.top10$cell_type <- factor(cts.top10$cell_type, levels=ct_order)
+cts.top10 <- cts.top10 %>%
+  arrange(cell_type)
+```
+
+```{r eval=TRUE}
+cts.top10 <- read.csv("data/processed_data/guilliams_liver/top10markers_CellTypes_20240516.csv")
+```
+
+```{r}
+kbl(cts.top10) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+```{r fig.width=7, fig.height=20}
+#downsample due to https://github.com/satijalab/seurat/issues/2724
+mk <- DoHeatmap(subset(data, downsample = 500), features = cts.top10$gene, size = 4, angle = 90) + NoLegend()
+mk
+```
+
+# Patchwork
+```{r eval=FALSE}
+nFeature_min = 200
+nFeature_max = 5000
+
+nCount_min = 500
+nCount_max = 30000
+
+percent.mt_min = 0
+percent.mt_max = 10
+
+layout <- "
+#####FFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+EEEEEFFFF
+"
+
+wrap_plots(umap, mk) + plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A", 
+
+                                 caption = "Figure 2. UMAP visualization and markers of cell types.") & 
+  theme(plot.caption = ggtext::element_textbox_simple(size = 15))
+```
+
+# Save
+## Set output file
+```{r}
+output_dir <- "data/processed_data/guilliams_liver/"
+date <- format(Sys.Date(), "%Y%m%d")
+```
+
+```{r eval=FALSE}
+saveRDS(data, file = file.path(output_dir, paste0("integrated_3m3f_", date, ".rds")), compress = FALSE)
+write.table(clusters.top10, file = file.path(output_dir, paste0("top10markers_Clusters_", date,".csv")), sep = ",", row.names = FALSE)
+write.table(cts.top10, file = file.path(output_dir, paste0("top10markers_CellTypes_", date, ".csv")), sep = ",", row.names = FALSE)
+```
+
+# Notes
+```{r}
+sessionInfo()
+```

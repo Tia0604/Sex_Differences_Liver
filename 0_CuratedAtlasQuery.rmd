@@ -1,0 +1,81 @@
+---
+title: "Obtain datasets and metadata from CuratedAtlasQuery"
+author: Tianze Cao
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+```{r Load libraries}
+library(remotes)
+library(Seurat)
+library(patchwork)
+library(CuratedAtlasQueryR)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(purrr)
+```
+
+```{r Get metadata}
+metadata <- get_metadata()
+
+#remove fetus and sample size less than 6
+excluded_file_ids <- c(
+  "ca4a7d56-739b-4e3c-8ecd-28704914cc14",
+  "343f46f2-7cdd-4da8-bc7f-50a18b2c0e8e",
+  "3ae36927-c188-4511-88cc-572ee1edf906",
+  "49b7dbae-540f-4d07-bb17-9172a848708b",
+  "5cb7ccfc-41d5-4613-82ce-e6d1888a0228",
+  "700695a4-b3cc-4352-9c6c-25bf054d016b",
+  "76afd5a3-7458-4d77-b6e9-f47c059047e3"
+)
+
+hormonised <- metadata %>%
+  filter(
+    str_detect(tissue, "liver") &
+    str_like(assay, "%10x%") &
+    disease == "normal" &
+    !file_id %in% excluded_file_ids)
+
+unhorminized_metadata <- hormonised %>%
+  get_unharmonised_metadata() %>%
+  collect()
+walk2(
+  unhorminized_metadata$file_id, 
+  unhorminized_metadata$unharmonised,
+  ~ {
+    file_name <- paste0("data/raw_data/caq_liver/unhorminized_", .x, ".csv")
+    
+    write.csv(
+      data.frame(content = .y),
+      file = file_name,
+      row.names = FALSE
+    )
+  }
+)
+
+hormonised %>%
+  distinct(tissue, file_id, sample_, development_stage) %>%
+  collect() %>%
+  group_by(tissue, file_id) %>%
+  summarize(sample_number = n_distinct(sample_),.groups = "drop")
+```
+
+```{r Get seurat object}
+single_cell_counts_seurat = get_seurat(hormonised)
+single_cell_counts_seurat |> saveRDS("data/raw_data/caq_liver.rds")
+```
+
+```{r Session info}
+sessionInfo()
+```

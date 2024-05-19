@@ -1,0 +1,720 @@
+---
+title: Gene set enrichment analysis
+author: "Tianze Cao"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+options(future.globals.maxSize= 10000*1024^2)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(readr)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(ggplot2)
+  library(org.Hs.eg.db)
+  library(UpSetR)
+  library(Seurat)
+  library(dplyr)
+  library(tidyr)
+  library(pathview)
+  library(msigdbr)
+  library(patchwork)
+  library(ggupset)
+  source("code/scripts/gsea_heatmap.R")
+})
+```
+
+## Set input file
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+#load("data/processed_data/guilliams_liver/muscat_output_simpCellType_20240418.RData")
+load("data/processed_data/guilliams_liver/muscat_output_allCellType_20240514.RData")
+load("data/processed_data/guilliams_liver/cellType_20240513.RData")
+#ct_order <- simp_ct_order
+#ct_colors <- simp_ct_colors
+
+input <- "data/processed_data/guilliams_liver/integrated_3m3f_20240423.rds"
+se <- readRDS(input)
+se$simp_sample_id <- factor(se$simp_sample_id, levels = c("male_1","male_2","male_3","female_1","female_2","female_3"))
+
+BTM_plus <- read_tsv("data/raw_data/BTM_plus.tsv")
+btm_db <- BTM_plus %>%
+  gather(key = "term", value = "gene") %>%
+  filter(!is.na(gene))
+
+msig_db <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  distinct(gs_name, entrez_gene) %>%
+  as.data.frame()
+```
+
+# GSEA
+```{r}
+cell_types <- unique(muscat_output$celltype_de$celltype_de$de_output_tidy$cluster_id)
+x_order <- intersect(ct_order, cell_types)
+
+print(x_order)
+```
+
+## Create gene lists
+Create gene lists (cluster_list)
+```{r}
+make_gene_list <- function (cell_type) {
+    d <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+                    filter(cluster_id == !!cell_type , contrast =="M-F" ) %>% #positive higher in males
+                    dplyr::select(gene, logFC) #ranked based on logfc
+    geneList <- d$logFC
+    names(geneList) <- as.character(d$gene)
+    geneList <- sort(geneList, decreasing = TRUE)
+    return(geneList)
+}
+
+cluster_list <- lapply(cell_types, make_gene_list)
+names(cluster_list) <- cell_types
+```
+
+Create KEGG gene lists (cluster_list_kegg)
+```{r message=FALSE}
+cluster_list_kegg <- lapply(cluster_list, function(x) {
+
+  name_table <- bitr(names(x), fromType = "SYMBOL", toType = "UNIPROT",
+            OrgDb = org.Hs.eg.db) %>% distinct(SYMBOL, .keep_all = TRUE)
+
+  names(x) <- name_table$UNIPROT
+  #around 5% genes are failed to map
+  x <- x[!is.na(names(x))]
+  return(x)
+})
+```
+
+Create MSig gene lists (cluster_list_msig)
+```{r message=FALSE}
+cluster_list_msig <- lapply(cluster_list, function(x) {
+
+  name_table <- bitr(names(x), fromType = "SYMBOL", toType = "ENTREZID",
+            OrgDb = org.Hs.eg.db) %>% distinct(SYMBOL, .keep_all = TRUE)
+
+  names(x) <- name_table$ENTREZID
+  #around 5% genes are failed to map
+  x <- x[!is.na(names(x))]
+  return(x)
+})
+```
+
+## GSEA with databases
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+gsea_go <- readRDS("data/processed_data/guilliams_liver/gseaGO_allCellType_20240514.rds")
+#gsea_go <- compareCluster(geneClusters = cluster_list,
+ #                    fun = gseGO,
+  #                   minGSSize = 10,
+   #                  pvalueCutoff = 0.05,
+    #                 pAdjustMethod = "BH",
+     #                OrgDb = org.Hs.eg.db,
+      #               ont = "ALL",
+       #              keyType = "SYMBOL")
+```
+
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+gsea_kegg <- readRDS("data/processed_data/guilliams_liver/gseaKEGG_allCellType_20240514.rds")
+#gsea_kegg <- compareCluster(geneClusters = cluster_list_kegg,
+ #                    fun = gseKEGG,
+  #                   minGSSize = 10,
+   #                  pvalueCutoff = 0.05,
+    #                 pAdjustMethod = "BH",
+     #                organism ="hsa",
+      #               keyType = "uniprot")
+```
+
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+gsea_msig <- readRDS("data/processed_data/guilliams_liver/gseaMSig_allCellType_20240514.rds")
+#gsea_msig <- compareCluster(cluster_list_msig, 
+ #                          fun = "GSEA", 
+  #                         TERM2GENE = msig_db, 
+   #                        pvalueCutoff = 0.05, 
+    #                       pAdjustMethod = "BH", 
+     #                      verbose = FALSE)
+```
+
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+gsea_btm <- readRDS("data/processed_data/guilliams_liver/gseaBTM_allCellType_20240514.rds")
+#gsea_btm <- compareCluster(cluster_list, 
+ #                          fun = "GSEA",
+  #                         TERM2GENE = btm_db,
+   #                        pvalueCutoff= 0.05,
+    #                       pAdjustMethod = "BH",
+     #                      verbose = FALSE)
+```
+
+## Enrichment result
+### GO
+```{r fig.width=22, fig.height=10}
+gsea_go <- pairwise_termsim(gsea_go)
+p1<-cnetplot(gsea_go, showCategory = 1, cex_label_category = 2.5, cex_category = 5)
+p2<-emapplot(gsea_go, showCategory = 4, cex_category=1.5, cex_label_category = 1.5, cex_line = 0.5, shadowtext = FALSE)
+p1+p2
+```
+
+#### Dotplot
+```{r fig.width=12, fig.height=9}
+immune_response <- c(
+  "inflammatory response",
+  "response to cytokine",
+  "response to molecule of bacterial origin",
+  "response to bacterium",
+  "response to lipopolysaccharide",
+  "granulocyte chemotaxis"
+)
+
+protein_synthesis <- c(
+    "ribosome",
+    "ribosomal subunit", 
+    "large ribosomal subunit",
+    "cytosolic large ribosomal subunit",
+    "cytoplasmic translation"
+    )
+
+miRNA_metabolism <- c(
+  "miRNA metabolic process",
+  "regulation of miRNA metabolic process",
+  "positive regulation of miRNA metabolic process"
+)
+
+adaptive_immune <- c(
+  "T cell activation",
+  "positive regulation of T cell activation",
+  "positive regulation of cell-cell adhesion",
+  "positive regulation of leukocyte cell-cell adhesion",
+  "MHC class II protein complex",
+  "MHC protein complex",
+  "peptide antigen binding",
+  "antigen binding",
+  "lumenal side of endoplasmic reticulum membrane",
+  "lumenal side of membrane",
+  "clathrin-coated endocytic vesicle membrane",
+  "clathrin-coated endocytic vesicle"
+)
+
+others <- c(
+  "positive regulation of programmed cell death",
+  "positive regulation of apoptotic process",
+  "detoxification",
+  "organic acid binding",
+  "carboxylic acid binding"
+    )
+
+gsea_go@compareClusterResult$grouping <- ifelse(gsea_go@compareClusterResult$Description %in% immune_response, "Immune Response",
+                                           ifelse(gsea_go@compareClusterResult$Description %in% adaptive_immune, "Adaptive Immune",
+                                                  ifelse(gsea_go@compareClusterResult$Description %in% protein_synthesis, "Protein Synthesis",
+                                                         ifelse(gsea_go@compareClusterResult$Description %in% miRNA_metabolism, "miRNA Metabolism",
+                                                                ifelse(gsea_go@compareClusterResult$Description %in% others, "Others", "NA")))))
+
+dotplot <- gsea_go %>%
+  filter(p.adjust < 0.05) %>%
+  dotplot(color = "NES", size = "setSize", showCategory =4, font.size = 10, label_format =  100) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(factor(grouping, levels = c("Immune Response", "Adaptive Immune", "Protein Synthesis", "miRNA Metabolism", "Others")) ~ .,
+             scales = "free_y", switch = "y", space = "free",
+             labeller = label_wrap_gen(width = 10)) +
+  labs(x = NULL) +
+  scale_fill_gradient2(low = "#C64700", high = "#0050A0", midpoint = 0, mid = "white",
+							  limits = c(-max(abs(gsea_go@compareClusterResult$NES)), max(abs(gsea_go@compareClusterResult$NES))),
+							  breaks = c(max(abs(gsea_go@compareClusterResult$NES)),-max(abs(gsea_go@compareClusterResult$NES))),
+							  labels = c("Enriched in Male", "Enriched in Female"))
+
+dotplot
+```
+
+#### Upset plot
+```{r fig.width=8, fig.height=5}
+df <- gsea_go@compareClusterResult %>%
+  filter(p.adjust < 0.05)
+df_list <- split(df, df$Cluster)
+
+new_df_list <- list()
+
+for (i in seq_along(df_list)) {
+  cluster_name <- names(df_list)[i]
+  cluster_data <- df_list[[i]]
+
+  new_df_list[[cluster_name]] <- cluster_data[["Description"]]
+}
+
+upset(fromList(new_df_list), nsets = length(new_df_list), order.by = "freq", text.scale = 1.3)
+
+#for patchwork
+upset <- df %>%
+  group_by(Description) %>%
+  summarize(Cluster = list(Cluster)) %>%
+  ggplot(aes(x = Cluster)) +
+    geom_bar() +
+    scale_x_upset()
+```
+
+### KEGG
+```{r fig.width=22, fig.height=10}
+gsea_kegg <- pairwise_termsim(gsea_kegg)
+p1<-cnetplot(gsea_kegg, showCategory = 3, cex_label_category = 2, cex_category = 5)
+p2<-emapplot(gsea_kegg, showCategory = 8, cex_category=1, cex_label_category = 1.5, cex_line = 0.5, shadowtext = FALSE)
+p1+p2
+```
+
+#### Dotplot
+```{r fig.width=10, fig.height=9}
+Neurodegenerative <-  c(
+  "Oxidative phosphorylation",
+  "Parkinson disease",
+  "Prion disease",
+  "Chemical carcinogenesis - reactive oxygen species",
+  "Retrograde endocannabinoid signaling"
+  )
+
+Immune_Response <- c(
+  "Th17 cell differentiation",
+  "Th1 and Th2 cell differentiation",
+  "Intestinal immune network for IgA production",
+  "Asthma",       
+  "Hematopoietic cell lineage",
+  "Type I diabetes mellitus",
+  "Graft-versus-host disease",
+  "Antigen processing and presentation"
+)
+
+Inflammatory_Signaling <- c(
+  "Complement and coagulation cascades",
+  "Toll-like receptor signaling pathway",
+  "Lipid and atherosclerosis",
+  "NF-kappa B signaling pathway",
+  "IL-17 signaling pathway",
+  "TNF signaling pathway",
+  "MAPK signaling pathway",
+  "Cytokine-cytokine receptor interaction"
+)
+
+Ohters <- c(
+  "Cytoskeleton in muscle cells",
+  "Coronavirus disease - COVID-19",
+  "Ribosome",
+  "Viral protein interaction with cytokine and cytokine receptor",
+  "Metabolism of xenobiotics by cytochrome P450",
+  "Drug metabolism - cytochrome P450"
+)
+
+
+gsea_kegg@compareClusterResult$grouping <- ifelse(gsea_kegg@compareClusterResult$Description %in% Neurodegenerative, "Neurodegenerative",
+                                                ifelse(gsea_kegg@compareClusterResult$Description %in% Immune_Response, "Immune Response",
+                                                     ifelse(gsea_kegg@compareClusterResult$Description %in% Inflammatory_Signaling, "Inflammatory Signaling",
+                                                          ifelse(gsea_kegg@compareClusterResult$Description %in% Ohters, "Ohters", "NA"))))
+
+dotplot_clusters <- gsea_kegg %>%
+  filter(p.adjust < 0.05) %>%
+  dotplot(color = "NES", size = "setSize", showCategory =8, font.size = 10, label_format =  100) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(factor(grouping, levels = c("Neurodegenerative", "Immune Response", "Inflammatory Signaling", "Ohters", "NA")) ~ .,
+             scales = "free_y", switch = "y", space = "free",
+             labeller = label_wrap_gen(width = 10)) +
+  labs(x = NULL) +
+  scale_fill_gradient2(low = "#C64700", high = "#0050A0", midpoint = 0, mid = "white",
+							  limits = c(-max(abs(gsea_kegg@compareClusterResult$NES)), max(abs(gsea_kegg@compareClusterResult$NES))),
+							  breaks = c(max(abs(gsea_kegg@compareClusterResult$NES)),-max(abs(gsea_kegg@compareClusterResult$NES))),
+							  labels = c("Enriched in Male", "Enriched in Female"))
+
+dotplot_clusters
+```
+
+#### Upset plot
+```{r fig.width=8, fig.height=6}
+df <- filter(gsea_kegg@compareClusterResult, p.adjust < 0.05)
+df_list <- split(df, df$Cluster)
+
+new_df_list <- list()
+
+for (i in seq_along(df_list)) {
+  cluster_name <- names(df_list)[i]  # Get the cluster name
+  cluster_data <- df_list[[i]]       # Get the list of dataframes for this cluster
+
+  new_df_list[[cluster_name]] <- cluster_data[["Description"]]
+}
+
+upset(fromList(new_df_list), nsets = length(new_df_list), order.by = "freq", text.scale = 1.3)
+```
+
+### MSig
+```{r fig.width=18, fig.height=9}
+gsea_msig <- pairwise_termsim(gsea_msig)
+p1<-cnetplot(gsea_msig, showCategory = 1, cex_label_category = 2, cex_category = 4)
+p2<-emapplot(gsea_msig, showCategory = 6, cex_category = 0.3, cex_label_category = 1.5, cex_line = 0.5, shadowtext = FALSE)
+p1+p2
+```
+
+#### Dotplot
+```{r}
+immune_inflammatory <- c(
+  "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+  "HALLMARK_ALLOGRAFT_REJECTION"
+)
+
+cellular_stress <- c(
+  "HALLMARK_UV_RESPONSE_UP",
+  "HALLMARK_HYPOXIA",
+  "HALLMARK_OXIDATIVE_PHOSPHORYLATION"
+)
+
+transcription_growth <- c(
+  "HALLMARK_MYC_TARGETS_V1",
+  "HALLMARK_IL2_STAT5_SIGNALING",
+  "HALLMARK_KRAS_SIGNALING_UP"
+)
+
+metabolic_homeostatic <- c(
+  "HALLMARK_HEME_METABOLISM",
+  "HALLMARK_ADIPOGENESIS"
+)
+
+dna_damage_tumor <- c(
+  "HALLMARK_COMPLEMENT",
+  "HALLMARK_P53_PATHWAY"
+)
+
+gsea_msig@compareClusterResult$grouping <- ifelse(gsea_msig@compareClusterResult$Description %in% immune_inflammatory, "Immune Inflammatory",
+                                                ifelse(gsea_msig@compareClusterResult$Description %in% cellular_stress, "Cellular Stress",
+                                                     ifelse(gsea_msig@compareClusterResult$Description %in% transcription_growth, "Transcription Growth",
+                                                          ifelse(gsea_msig@compareClusterResult$Description %in% metabolic_homeostatic, "Metabolic Homeostatic",
+                                                                 ifelse(gsea_msig@compareClusterResult$Description %in% dna_damage_tumor, "Dna Damage Tumor", "NA")))))
+```
+
+```{r eval=FALSE}
+custom_order <- c(
+  "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+  "HALLMARK_COMPLEMENT",
+  "HALLMARK_COAGULATION",
+  "HALLMARK_ALLOGRAFT_REJECTION",
+  "HALLMARK_OXIDATIVE_PHOSPHORYLATION",
+  "HALLMARK_INFLAMMATORY_RESPONSE",
+  "HALLMARK_IL2_STAT5_SIGNALING",
+  "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+  "HALLMARK_MYC_TARGETS_V1",
+  "HALLMARK_MITOTIC_SPINDLE",
+  "HALLMARK_UV_RESPONSE_DN",
+  "HALLMARK_ESTROGEN_RESPONSE_EARLY",
+  "HALLMARK_HYPOXIA",
+  "HALLMARK_KRAS_SIGNALING_DN",
+  "HALLMARK_P53_PATHWAY"
+)
+filtered_data <- gsea_msig %>%
+  mutate(ID = factor(ID, levels = custom_order)) %>%
+  arrange(ID)
+filtered_data@compareClusterResult$ID <- filtered_data@compareClusterResult$Description
+```
+
+```{r fig.width=10, fig.height=6}
+dotplot_clusters <- gsea_msig%>%
+  filter(p.adjust < 0.05) %>%
+  dotplot(color = "NES", size = "setSize", showCategory =4, font.size = 10, label_format =  100) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(factor(grouping, levels = c("Immune Inflammatory", "Cellular Stress", "Transcription Growth", "Metabolic Homeostatic", "Dna Damage Tumor")) ~ .,
+             scales = "free_y", switch = "y", space = "free",
+             labeller = label_wrap_gen(width = 10)) +
+  labs(x = NULL) +
+  scale_fill_gradient2(low = "#C64700", high = "#0050A0", midpoint = 0, mid = "white",
+							  limits = c(-max(abs(gsea_msig@compareClusterResult$NES)), max(abs(gsea_msig@compareClusterResult$NES))),
+							  breaks = c(max(abs(gsea_msig@compareClusterResult$NES)),-max(abs(gsea_msig@compareClusterResult$NES))),
+							  labels = c("Enriched in Male", "Enriched in Female"))
+
+dotplot_clusters
+```
+
+#### Upset plot
+```{r fig.width=8, fig.height=6}
+df <- filter(gsea_msig@compareClusterResult, p.adjust < 0.05)
+df_list <- split(df, df$Cluster)
+
+new_df_list <- list()
+
+for (i in seq_along(df_list)) {
+  cluster_name <- names(df_list)[i]  # Get the cluster name
+  cluster_data <- df_list[[i]]       # Get the list of dataframes for this cluster
+
+  new_df_list[[cluster_name]] <- cluster_data[["Description"]]
+}
+
+upset(fromList(new_df_list), nsets = length(new_df_list), order.by = "freq", text.scale = 1.3)
+```
+
+### BTM
+```{r fig.width=18, fig.height=9}
+gsea_btm <- pairwise_termsim(gsea_btm)
+p1<-cnetplot(gsea_btm, showCategory = 4, cex_label_category = 2, cex_category = 2)
+p2<-emapplot(gsea_btm, showCategory = 6, cex_category = 0.3, cex_label_category = 1.5, cex_line = 0.5, shadowtext = FALSE)
+p1+p2
+```
+
+#### Dotplot
+```{r fig.width=10, fig.height=6}
+dotplot_clusters <- gsea_btm %>%
+  filter(p.adjust < 0.05) %>%
+  dotplot(color = "NES", size = "setSize", showCategory =8, font.size = 10, label_format =  100) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  #facet_grid(factor(grouping, levels = c("Neurological Disorders", "Cancer Signaling", "Metabolic Regulation", "Immune Reponse")) ~ .,
+   #          scales = "free_y", switch = "y", space = "free",
+    #         labeller = label_wrap_gen(width = 10)) +
+  labs(x = NULL) +
+  scale_fill_gradient2(low = "#C64700", high = "#0050A0", midpoint = 0, mid = "white",
+							  limits = c(-max(abs(gsea_btm@compareClusterResult$NES)), max(abs(gsea_btm@compareClusterResult$NES))),
+							  breaks = c(max(abs(gsea_btm@compareClusterResult$NES)),-max(abs(gsea_btm@compareClusterResult$NES))),
+							  labels = c("Enriched in Male", "Enriched in Female"))
+
+dotplot_clusters
+```
+
+#### Upset plot
+```{r fig.width=8, fig.height=6}
+df <- filter(gsea_btm@compareClusterResult, p.adjust < 0.05)
+df_list <- split(df, df$Cluster)
+
+new_df_list <- list()
+
+for (i in seq_along(df_list)) {
+  cluster_name <- names(df_list)[i]  # Get the cluster name
+  cluster_data <- df_list[[i]]       # Get the list of dataframes for this cluster
+
+  new_df_list[[cluster_name]] <- cluster_data[["Description"]]
+}
+
+upset(fromList(new_df_list), nsets = length(new_df_list), order.by = "freq", text.scale = 1.3)
+```
+
+### Set category and cell_type
+#### KEGG-IL-17 signaling pathway-cDC2s
+##### logFC dotplot
+```{r fig.width=8, fig.height=3}
+#Set category
+category <- "IL-17 signaling pathway"
+
+genes_to_plot <- gsea_kegg@compareClusterResult %>%
+  filter(Description == category) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist() %>%
+  bitr(fromType = "UNIPROT", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+
+# Filter and subset the gene expression data for the specified contrast (M-F)
+filtered_genes <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+  filter(contrast == "M-F", gene %in% genes_to_plot$SYMBOL) %>%
+   mutate(cluster_id = factor(cluster_id, levels = ct_order))
+
+# Create a dot plot of log fold changes (logFC) vs. gene names (gene) colored by cluster_id
+ggplot(filtered_genes, aes(x = logFC, y = gene, color = cluster_id)) +
+  geom_vline(xintercept = 0, color = "grey", linewidth = 1) +
+  geom_point(size = 2) +
+  labs(x = "Log Fold Change (M-F)", y = "Gene", color = "Cluster ID") +
+  theme_minimal() +
+  scale_color_manual(values = ct_colors)
+```
+
+##### Heatmap
+```{r fig.width=8, fig.height=3}
+#set cell type from here (cell_type or simp_cell_type) and category
+cell_type <- "cDC2s"
+category <- "IL-17 signaling pathway"
+
+genes_to_plot <- gsea_kegg@compareClusterResult %>%
+  filter(Description == category) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist() %>%
+  bitr(fromType = "UNIPROT", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+
+se.ct <- subset(se, cells = colnames(se)[se@meta.data$cell_type == cell_type])
+Idents(se.ct) <- "simp_sample_id"
+
+DoHeatmap(se.ct, size = 3, features = genes_to_plot$SYMBOL)
+```
+
+##### Pathview
+```{r}
+#set cell type from here (cell_type or simp_cell_type) and kegg_id
+cell_type <- "cDC2s"
+pathway <- "hsa04657" #IL-17 signaling pathway
+
+gene_list <- cluster_list_kegg[[cell_type]]
+a <- bitr_kegg(names(gene_list), fromType = "uniprot", toType="kegg", organism="hsa")
+names(gene_list) <- a$kegg
+```
+
+TODO: show result in knitted file
+```{r eval=FALSE}
+date <- format(Sys.Date(), "%Y%m%d")
+pathway_obj <- pathview(gene.data  = gene_list,
+                     pathway.id = pathway,
+                     species    = "hsa",
+                     limit      = list(gene=1, cpd=1),
+                     out.suffix = paste0(cell_type, "_", date)
+)
+```
+
+#### GO-MHC class II protein complex-cDCS & T cell activation-mono
+##### logFC dotplot
+```{r fig.width=8, fig.height=4}
+#set category
+category <- "inflammatory response"
+
+genes_to_plot <- gsea_go@compareClusterResult %>%
+  filter(Description == category) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist()
+
+# Filter and subset the gene expression data for the specified contrast (M-F)
+filtered_genes <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+  filter(contrast == "M-F", gene %in% genes_to_plot) %>%
+   mutate(cluster_id = factor(cluster_id, levels = ct_order))
+
+# Create a dot plot of log fold changes (logFC) vs. gene names (gene) colored by cluster_id
+ggplot(filtered_genes, aes(x = logFC, y = gene, color = cluster_id)) +
+  geom_vline(xintercept = 0, color = "grey", linewidth = 1) +
+  geom_point(size = 2) +
+  labs(x = "Log Fold Change (M-F)", y = "Gene", color = "Cluster ID") +
+  theme_minimal() +
+  scale_color_manual(values = ct_colors) + 
+  theme(axis.text.y = element_text(size = 0))
+```
+
+##### Heatmap
+```{r fig.width=8, fig.height=4}
+#set cell type from here (cell_type or simp_cell_type) and category
+cell_type <- c("cDC1s", "cDC2s")
+category <- "MHC class II protein complex"
+
+genes_to_plot <- gsea_go@compareClusterResult %>%
+  filter(Description == category) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist()
+
+se.ct <- subset(se, cells = colnames(se)[se@meta.data$cell_type %in% cell_type])
+Idents(se.ct) <- "simp_sample_id"
+
+heatmap <- DoHeatmap(subset(se.ct, downsample = 500), size = 3, features = genes_to_plot) + NoLegend()
+heatmap
+```
+
+```{r fig.width=8, fig.height=7}
+#set cell type from here (cell_type or simp_cell_type) and category
+cell_type <- "Mono+mono derived cells"
+category <- "positive regulation of T cell activation"
+
+genes_to_plot <- gsea_go@compareClusterResult %>%
+  filter(Description == category) %>%
+  filter(cell_type == cell_type) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist()
+
+se.ct <- subset(se, cells = colnames(se)[se@meta.data$cell_type == cell_type])
+Idents(se.ct) <- "simp_sample_id"
+
+DoHeatmap(subset(se.ct, downsample = 500), size = 3, features = genes_to_plot) + NoLegend() + 
+    theme(text = element_text(size = 10))
+```
+
+#### MsigDB-HALLMARK_TNFA_SIGNALING_VIA_NFKB-Tcells
+##### logFC dotplot
+```{r fig.width=20, fig.height=5}
+#set catogory
+category <- "HALLMARK_INFLAMMATORY_RESPONSE"
+
+genes_to_plot <- gsea_msig@compareClusterResult %>%
+  filter(Description == category) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist() %>%
+  bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+
+# Filter and subset the gene expression data for the specified contrast (M-F)
+filtered_genes <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+  filter(contrast == "M-F", gene %in% genes_to_plot$SYMBOL) %>%
+   mutate(cluster_id = factor(cluster_id, levels = ct_order))
+
+# Create a dot plot of log fold changes (logFC) vs. gene names (gene) colored by cluster_id
+logfc <- ggplot(filtered_genes, aes(x = logFC, y = gene, color = cluster_id)) +
+  geom_vline(xintercept = 0, color = "grey", linewidth = 1) +
+  geom_point(size = 2) +
+  labs(x = "Log Fold Change (M-F)", y = "Gene", color = "Cluster ID", title = "Hallmark Genes in Inflammatory Response") +
+  theme_minimal() +
+  scale_color_manual(values = ct_colors) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) + 
+  coord_flip() 
+logfc
+```
+
+##### Heatmap
+```{r fig.width=8, fig.height=12}
+#set cell type from here (cell_type or simp_cell_type)
+cell_type <- "T cells"
+category <- "HALLMARK_TNFA_SIGNALING_VIA_NFKB"
+
+genes_to_plot <- gsea_msig@compareClusterResult %>%
+  filter(Description == category) %>%
+  filter(cell_type == cell_type) %>%
+  arrange(p.adjust) %>%
+  pull(core_enrichment) %>%
+  strsplit(split = "/") %>%
+  unlist() %>%
+  bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+
+se.ct <- subset(se, cells = colnames(se)[se@meta.data$cell_type == cell_type])
+Idents(se.ct) <- "simp_sample_id"
+
+DoHeatmap(se.ct, size = 3, features = genes_to_plot$SYMBOL) + NoLegend() + 
+  theme(axis.text.y = element_text(size = 7))
+```
+
+# Patchwork
+```{r eval=FALSE}
+wrap_plots(dotplot,logfc,upset,heatmap) + plot_layout(widths = c(1,1), heights = c(5,2)) +
+  plot_annotation(tag_levels = "A",
+                  caption = "Figure 5. GSEA") & 
+  theme(plot.caption = ggtext::element_textbox_simple(size = 15)) 
+```
+
+# Save
+```{r}
+output_dir <- "data/processed_data/guilliams_liver/"
+date <- format(Sys.Date(), "%Y%m%d")
+```
+
+## Set output file
+```{r eval=FALSE}
+#set cell type from here (cell_type or simp_cell_type)
+saveRDS(gsea_go, paste0(output_dir, "gseaGO_allCellType_", date, ".rds"))
+saveRDS(gsea_kegg, paste0(output_dir, "gseaKEGG_allCellType_", date, ".rds"))
+saveRDS(gsea_msig, paste0(output_dir, "gseaMSig_allCellType_", date, ".rds"))
+saveRDS(gsea_btm, paste0(output_dir, "gseaBTM_allCellType_", date, ".rds"))
+```
+
+# Notes
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,401 @@
+---
+title: Cell Type Frequencies
+author: "Tianze Cao"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+options(future.globals.maxSize= 10000*1024^2)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(dplyr)
+  library(magrittr)
+  library(kableExtra)
+  library(dittoSeq)
+  library(speckle)
+  library(limma)
+  library(patchwork)
+})
+```
+
+## Set input file
+```{r}
+input <- "data/processed_data/guilliams_liver/standardized_3m3f_20240513.rds"
+se <- readRDS(input)
+load("data/processed_data/guilliams_liver/cellType_20240513.RData")
+```
+
+# Cell type frequeny plot
+```{r}
+ditto_order <- c(12,5,13,1,11,10,7,3,4,6,8,2,9)
+simp_ditto_order <- c(8,3,10,1,9,4,5,6,2,7)
+```
+
+## By sex differences
+Age should be counted into biological differences when metadata is sufficient.
+### Cell types
+```{r fig.width=8, fig.height=8}
+bar1 <- dittoBarPlot(se, var = "cell_type", group.by = "sex", color.panel = ct_colors, var.labels.reorder = ditto_order, main = NULL, xlab = "Sex")
+
+#dittoBarPlot(se, var = "cell_type", group.by = "sample_id", xlab = NULL,
+ #            split.by = "sex", color.panel = ct_colors, var.labels.reorder = ditto_order) +
+  #facet_grid(cols = vars(sex), scale="free", space="free") +
+  #theme(legend.position = "bottom")
+```
+
+```{r fig.width=8, fig.height=8}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = c("sex", "project_id"), color.panel = ct_colors, var.labels.reorder = ditto_order) +
+    facet_grid(rows = vars(project_id), cols = vars(sex),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+} else {
+  bar2 <- dittoBarPlot(se, var = "cell_type", group.by = "sample_id", main = NULL, xlab = "Donor ID", ylab = NULL,
+               split.by = c("platform", "sex"), color.panel = ct_colors, var.labels.reorder = ditto_order) +
+    facet_grid(rows = vars(platform), cols = vars(sex),
+               scale="free", space="free")
+}
+```
+
+```{r fig.width=8, fig.height=6}
+bar_plot <- bar1 + bar2 + plot_layout(widths = c(1,2), guides = 'collect')
+bar_plot
+```
+
+### Simplified cell types
+```{r fig.width=8, fig.height=7}
+dittoBarPlot(se, var = "simp_cell_type", group.by = "sample_id", xlab = NULL,
+             split.by = "sex", color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+  facet_grid(cols = vars(sex), scale="free", space="free") +
+  theme(legend.position = "bottom")
+```
+
+```{r fig.width=8, fig.height=8}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "simp_cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = c("sex", "project_id"), color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+    facet_grid(rows = vars(project_id), cols = vars(sex),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+} else {
+  dittoBarPlot(se, var = "simp_cell_type", group.by = "sample", xlab = NULL,
+               split.by = c("sex", "sample_id"), color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+    facet_grid(rows = vars(sex), cols = vars(sample_id),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+}
+```
+
+## By technique differences
+### Cell types
+```{r fig.width=8, fig.height=8}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = "project_id", color.panel = ct_colors, var.labels.reorder = ditto_order) +
+    facet_grid(cols = vars(project_id), scale="free", space="free") +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r fig.width=8, fig.height=8}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = c("platform", "project_id"), color.panel = ct_colors, var.labels.reorder = ditto_order) +
+    facet_grid(rows = vars(platform), cols = vars(project_id),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+} else {
+  dittoBarPlot(se, var = "cell_type", group.by = "sample", xlab = NULL,
+               split.by = c("platform", "sample_id"), color.panel = ct_colors, var.labels.reorder = ditto_order) +
+    facet_grid(rows = vars(platform), cols = vars(sample_id),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+}
+```
+
+### Simplified cell types
+```{r fig.width=8, fig.height=7}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "simp_cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = "project_id", color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+    facet_grid(cols = vars(project_id), scale="free", space="free") +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r fig.width=8, fig.height=7}
+if ('project_id' %in% colnames(se@meta.data)) {
+  dittoBarPlot(se, var = "simp_cell_type", group.by = "sample_id", xlab = NULL,
+               split.by = c("platform", "project_id"), color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+    facet_grid(rows = vars(platform), cols = vars(project_id),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+} else {
+  dittoBarPlot(se, var = "simp_cell_type", group.by = "sample", xlab = NULL,
+               split.by = c("platform", "sample_id"), color.panel = simp_ct_colors, var.labels.reorder = simp_ditto_order) +
+    facet_grid(rows = vars(platform), cols = vars(sample_id),
+               scale="free", space="free") +
+    theme(legend.position = "bottom")
+}
+```
+
+# Statistic test
+cell frequencies
+```{r message=FALSE}
+#calculates and transforms cell type proportions
+props <- getTransformedProps(clusters = se$cell_type,
+                             sample = se$sample_id,
+                             transform = "logit")
+
+simp_props <- getTransformedProps(clusters = se$simp_cell_type,
+                             sample = se$sample_id,
+                             transform = "logit")
+
+freq_df <- props$Proportions %>%
+        as.data.frame() %>%
+        tidyr::pivot_wider(names_from = "clusters",
+                    values_from = "Freq",
+                    ) %>%
+        tibble::column_to_rownames("sample") %>%
+        na.omit()
+
+simp_freq_df <- simp_props$Proportions %>%
+        as.data.frame() %>%
+        tidyr::pivot_wider(names_from = "clusters",
+                    values_from = "Freq",
+                    ) %>%
+        tibble::column_to_rownames("sample") %>%
+        na.omit()
+```
+
+set variance info
+```{r}
+#one dornor has multiple samples, on project only
+vari_df <- se@meta.data %>%
+  distinct(sample_id, sex, platform) %>%
+  tibble::remove_rownames() %>%
+  tibble::column_to_rownames("sample_id")
+
+#transform into dummy variable matrix
+design <- model.matrix(~ 0 + sex + platform, data = vari_df)
+```
+
+## Variance permutation
+TODO: add age as linear regression variables
+```{r}
+#permutational multivariate analysis of variance using distance matrices
+adonis <- vegan::adonis2(freq_df ~ sex + platform, data = vari_df, method = "euclidean", permutations = 999)
+
+adonis <- adonis %>%
+  filter(!grepl("Total", rownames(.))) %>%
+  arrange(SumOfSqs)
+```
+
+```{r fig.width=8, fig.height=2}
+vari_plot <- adonis %>%
+  mutate(row_names = factor(rownames(adonis), levels = unique(rownames(adonis)))) %>%
+  ggplot(aes(fill = row_names, y = R2, x = 1)) +
+  geom_bar(stat="identity", position = "stack") +
+  coord_flip() +
+  theme_classic() +
+  labs(x="", y="Variance explained", fill="Variables",
+       title = "Proportion of cell type frequency variance among donors") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+vari_plot
+```
+
+## M/F t-test
+```{r}
+contr <- makeContrasts(sexM-sexF, levels = design)
+```
+
+detailed cell types
+```{r}
+t_test <- propeller.ttest(props,
+                       design,
+                       contr,
+                       robust = TRUE,
+                       trend=FALSE,
+                       sort=TRUE
+)
+
+t_test$PropRatioLog2 <- log2(t_test$PropRatio)
+t_test$M_F_Log2Ratio <- log2(t_test$PropMean.sexM / t_test$PropMean.sexF)
+t_test$Sign <- ifelse(t_test$P.Value < 0.001, "***",
+                      ifelse(t_test$P.Value < 0.01, "**",
+                        ifelse(t_test$P.Value < 0.05, "*", "")))
+
+ct_group <- se@meta.data %>%
+  distinct(cell_type, simp_cell_type)
+t_test <- t_test %>%
+  tibble::rownames_to_column(var = "cell_type") %>%
+  full_join(ct_group, by = c("cell_type" = "cell_type"))
+
+kbl(t_test) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+
+simplified cell types
+```{r}
+simp_t_test <- propeller.ttest(simp_props,
+                       design,
+                       contr,
+                       robust = TRUE,
+                       trend=FALSE,
+                       sort=TRUE
+)
+
+simp_t_test$PropRatioLog2 <- log2(simp_t_test$PropRatio)
+simp_t_test$M_F_Log2Ratio <- log2(simp_t_test$PropMean.sexM / simp_t_test$PropMean.sexF)
+simp_t_test$Sign <- ifelse(simp_t_test$P.Value < 0.001, "***",
+                      ifelse(simp_t_test$P.Value < 0.01, "**",
+                        ifelse(simp_t_test$P.Value < 0.05, "*", "")))
+
+simp_t_test <- tibble::rownames_to_column(simp_t_test, var = "cell_type")
+
+kbl(simp_t_test) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+```{r}
+contr <- makeContrasts(sexM-sexF, levels = design)
+```
+
+### Dot plot
+```{r fig.width=8, fig.height=6}
+dot1 <- t_test %>%
+  arrange(desc(M_F_Log2Ratio)) %>%
+  mutate(cell_type = factor(cell_type, levels = cell_type),
+         simp_cell_type = factor(simp_cell_type, levels = simp_ct_order)) %>%
+  # plot
+  ggplot(aes(x = M_F_Log2Ratio, y = cell_type, color = simp_cell_type)) +
+  geom_vline(xintercept = 0, color = "grey", linewidth = 1.5) +
+  # add points
+  geom_point(size = 7) +
+  facet_grid(rows = vars(factor(simp_cell_type,)),
+             scales = "free_y", switch = "y", space = "free",
+             labeller = label_wrap_gen(width = 10))+
+  theme_bw() +
+  theme(strip.text.y = element_text(size = 7), title = element_text(margin = margin(b = 0)))+
+  # plot title
+  labs(title = NULL, y = NULL,
+       color = NULL)  +
+  # axis limits
+  xlim(c(-3, 3)) +
+  #axis title
+  xlab("Log2 (Male/Female)") +
+  scale_color_manual(values = simp_ct_colors)
+dot1
+```
+
+```{r fig.width=6, fig.height=8}
+# Define the classification of cell types into lymphoid or myeloid
+lymphoid_cell_types <- c("NK cell", "Cycling T/NK cell", "T cell", "B cell")
+
+# Mutate cell_type into a new column indicating lymphoid or myeloid
+t_test <- t_test %>%
+  mutate(cell_type_classification = ifelse(simp_cell_type %in% lymphoid_cell_types, "Lymphoid", "Myeloid")) %>%
+  mutate(cell_type_classification = factor(cell_type_classification, levels = c("Lymphoid", "Myeloid"))) %>%
+  arrange(desc(M_F_Log2Ratio)) %>%
+  mutate(cell_type = factor(cell_type, levels = cell_type),
+         simp_cell_type = factor(simp_cell_type, levels = simp_ct_order))
+
+# Plot with facet grid based on cell_type_classification
+dot2 <- t_test %>%
+  ggplot(aes(x = M_F_Log2Ratio, y = cell_type, color = simp_cell_type)) +
+  geom_vline(xintercept = 0, color = "grey", linewidth = 1.5) +
+  geom_point(size = 7) +
+  facet_grid(rows = vars(cell_type_classification),  # Facet based on cell_type_classification
+             scales = "free", space = "free_y") +
+  theme_bw() +
+  theme(title = element_text(margin = margin(b = 0))) +
+  labs(title = NULL, y = NULL,
+       color = NULL) +
+  xlim(c(-3, 3)) +
+  xlab("Log2 (Male/Female)") +
+  scale_color_manual(values = simp_ct_colors)
+dot2
+```
+
+### Box plot
+```{r fig.width=3, fig.height=2.6}
+df <- merge(vari_df, freq_df, by = "row.names")
+simp_df <- merge(vari_df, simp_freq_df, by = "row.names")
+
+box_list <- list()
+
+#set here for simplified cell type or not (df, simp_df)
+if ("project_id" %in% se@meta.data) {
+  melted_df <- reshape2::melt(df, id.vars = c("Row.names", "sex", "platform", "project_id"))
+} else {
+  melted_df <- reshape2::melt(df, id.vars = c("Row.names", "sex", "platform"))
+}
+
+#set here for simplified cell type or not (t_test, simp_t_test)
+names(melted_df)[names(melted_df) == "variable"] <- "cell_type"
+melted_df <- left_join(melted_df, t_test[, c("cell_type", "P.Value", "Sign")], by = "cell_type")
+
+for (cell_type in ct_order) {
+  subset_df <- melted_df[melted_df$cell_type == cell_type, ]
+  
+  p <- ggplot(subset_df, aes(x = sex, y = value, fill = sex)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    stat_summary(fun = mean, geom = "point", shape = 23, size = 3, color = "black", fill = "white") +
+    stat_summary(fun = median, geom = "point", shape = 21, size = 3, color = "black") +
+    labs(x = "Sex", y = "Cell Type Frequency", fill = "Sex") +
+    ggtitle(cell_type) +
+    theme_minimal() + 
+    geom_text(data = subset_df, 
+              aes(x = 1.5, y = max(subset_df$value) + 0.1 * diff(range(subset_df$value)), 
+                label = paste("P =", round(P.Value, 2), Sign)), 
+              vjust = 1, color = "black", size = 4)
+  print(p)
+  box_list[[cell_type]] <- p
+}
+```
+
+# Patchwork
+```{r eval=FALSE}
+layout <- "
+AACCC
+AACCC
+AACCC
+AACCC
+AACCC
+AACCC
+BBCCC
+"
+
+wrap_plots(bar_plot, vari_plot, dot_plot) + plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A", 
+
+                                 caption = "Figure 3. Sex effect on cell type frequency.") & 
+  theme(plot.caption = ggtext::element_textbox_simple(size = 15)) 
+```
+
+# Notes
+```{r}
+sessionInfo()
+```

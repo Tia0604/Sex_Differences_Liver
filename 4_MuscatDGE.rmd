@@ -1,0 +1,303 @@
+---
+title: Sex Differential Expression Analysis
+author: "Tianze Cao"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+options(future.globals.maxSize= 10000*1024^2)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SingleCellExperiment)
+  library(dplyr)
+  library(ggplot2)
+  library(muscatWrapper)
+  library(kableExtra)
+  library(patchwork)
+})
+```
+
+## Set input file
+```{r}
+input <- "data/processed_data/guilliams_liver/integrated_3m3f_20240423.rds"
+se <- readRDS(input)
+load("data/processed_data/guilliams_liver/cellType_20240513.RData")
+```
+
+# Muscat
+https://github.com/saeyslab/muscatWrapper/blob/master/vignettes/basic_analysis_batchcor.md
+## Preparation
+```{r}
+sce <- as.SingleCellExperiment(se, assay = "RNA")
+```
+
+### Set covariates from here
+project: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE135893
+```{r}
+sample_id <- "sample_id"
+group_id <- "sex"
+celltype_id <- "cell_type"
+
+simp_celltype_id <- "simp_cell_type"
+covariates <- "platform"
+```
+
+### Set mini_cells
+```{r}
+#It is recommended to have at least 10 (and preferably more) cells in each sample-celltype combination.
+min_cells <- 10
+```
+
+### Check cell type abundance
+When we don’t have two or more samples per group (M/F) left, we cannot do a group comparison (we need at least 2 replicates per group for a statistical analysis).
+```{r fig.width=8, fig.height=16}
+abundance_output <- get_abundance_info(sce, sample_id, group_id, celltype_id, min_cells,  covariates = covariates)
+
+#change the order of cell types in the plot
+abundance_output$abund_plot_sample$data$celltype_id = factor(abundance_output$abund_plot_sample$data$celltype_id, levels = ct_order)
+
+abundance_output$abund_plot_sample
+```
+
+```{r fig.width=8, fig.height=8, eval=TRUE}
+simp_abundance_output <- get_abundance_info(sce, sample_id, group_id, simp_celltype_id, min_cells, covariates = covariates)
+
+#change the order of cell types in the plot
+simp_abundance_output$abund_plot_sample$data$celltype_id = factor(simp_abundance_output$abund_plot_sample$data$celltype_id, levels = simp_ct_order)
+
+simp_abundance_output$abund_plot_sample
+```
+
+#### Box plot
+```{r fig.width=8, fig.height=16}
+#change the order of cell types in the plot
+abundance_output$abund_plot_group$data$celltype_id = factor(abundance_output$abund_plot_group$data$celltype_id, levels = ct_order)
+
+if(is.na(covariates)){
+  abundance_output$abund_plot_group +
+    facet_wrap(~celltype_id, ncol = 3, scales = "free_y")
+} else{
+  abundance_output$abund_plot_group +
+    aes(x = group_covariate_id, color = covariate_oi) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    facet_wrap(~celltype_id, ncol = 3, scales = "free_y")
+}
+```
+
+```{r fig.width=8, fig.height=8, eval=TRUE}
+simp_abundance_output <- get_abundance_info(sce, sample_id, group_id, simp_celltype_id, min_cells, covariates = covariates)
+
+#change the order of cell types in the plot
+simp_abundance_output$abund_plot_group$data$celltype_id = factor(simp_abundance_output$abund_plot_group$data$celltype_id, levels = simp_ct_order)
+
+if(is.na(covariates)){
+  simp_abundance_output$abund_plot_group
+} else{
+  simp_abundance_output$abund_plot_group +
+    aes(x = group_covariate_id, color = covariate_oi) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    facet_wrap(~celltype_id, ncol = 3, scales = "free_y")
+}
+```
+
+#### Detailed table
+```{r}
+false_rows <- which(abundance_output$abundance_data$keep == "FALSE")
+
+kbl(abundance_output$abundance_data, caption = "Abundance of sample_celltype combinations") %>%
+  kable_paper() %>%
+  row_spec(row = false_rows, bold = TRUE, color = "white", background = "#D7261E") %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+```{r eval=TRUE}
+simp_false_rows <- which(simp_abundance_output$abundance_data$keep == "FALSE")
+
+kbl(simp_abundance_output$abundance_data, caption = "Abundance of sample_(simplified)celltype combinations") %>%
+  kable_paper() %>%
+  row_spec(row = simp_false_rows, bold = TRUE, color = "white", background = "#D7261E") %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+## DE analysis
+The multi-group, multi-sample differential expression (DE) analysis (also called ‘differential state’ analysis by the developers of Muscat).
+```{r}
+contrasts_oi <- c("'F-M','M-F'")
+contrast_tbl <- tibble(contrast = c("F-M", "M-F"),
+                        group = c("F", "M"))
+```
+
+### Set cell type from here (cell_type or simp_cell_type)
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+#celltype_id <- simp_celltype_id
+#abundance_output <- simp_abundance_output
+#ct_order <- simp_ct_order
+#ct_colors <- simp_ct_colors
+#load("data/processed_data/guilliams_liver/muscat_output_simpCellType_20240418.RData")
+load("data/processed_data/guilliams_liver/muscat_output_allCellType_20240514.RData")
+
+#muscat_output <- muscat_analysis(
+ #    sce = sce,
+  #   celltype_id = celltype_id,
+   #  sample_id = sample_id,
+    # group_id = group_id,
+     #covariates = covariates,
+     #contrasts_oi = contrasts_oi,
+     #contrast_tbl = contrast_tbl)
+```
+
+The p-value distributions should be uniform distributions, with a peak allowed between 0 and 0.05 if there would be a clear biological effect in the data.If the effect is not clear, it might point to issues in the DE model definition, e.g., lack of covariances, or existence of substructure.
+```{r fig.width=8, fig.height=8}
+muscat_output$celltype_de$hist_pvals +
+  facet_wrap(~cluster_id, ncol = 3)
+```
+
+```{r}
+#didn't filter & logFC >= 1
+DEGs_table <- muscat_output$celltype_de$celltype_de$de_output_tidy %>% filter(p_adj.loc <= 0.05) %>% arrange(p_adj) %>% filter(contrast == "M-F")
+
+kbl(DEGs_table, caption = "Differential expression genes") %>%
+  kable_paper()
+```
+
+### Explore DEGs in each cell type
+(Note 1 : Due to the pseudoubulking, single-cell level information is lost and Muscat can be underpowered. Therefore it is possible that are sometimes no significant DE genes after multiple testing correction. In that case, using less stringent cutoffs is better)
+
+(Note 2 : If having a few samples per group (<5), it is likely that some DE genes will be driven by an outlier sample. Therefore it is always necessary to visualize the expression of the DE genes in the violin and dotplots shown here)
+
+```{r fig.width=20, fig.height=8, message=FALSE}
+for (ct in unique(muscat_output$celltype_de$celltype_de$de_output_tidy$cluster_id)){
+  group_oi = "M"
+  celltype_oi = ct
+  
+  #didn't filter & logFC >= 1
+  DE_genes = muscat_output$celltype_de$celltype_de$de_output_tidy  %>% inner_join(contrast_tbl) %>% filter(group == group_oi) %>% filter(cluster_id == celltype_oi) %>% filter(p_adj.loc <= 0.05) %>% arrange(p_adj.loc) %>% pull(gene) %>% unique()
+
+  contains_no_X_Y <- any(!grepl("[XY]", DE_genes))
+
+  # If any gene name doesn't contain "X" or "Y", gene_oi is the the first gene without "X" or "Y", otherwise first gene in the list
+  gene_oi <- ifelse(contains_no_X_Y, DE_genes[which(!grepl("[XY]", DE_genes))[1]], DE_genes[1])
+  
+  violin_plot = make_DEgene_violin_plot(sce = sce, gene_oi = gene_oi, celltype_oi = celltype_oi, group_id = group_id, sample_id = sample_id, celltype_id = celltype_id)
+  dotplots_reversed = make_DEgene_dotplot_pseudobulk_reversed(genes_oi = DE_genes, celltype_info = muscat_output$celltype_info, abundance_data = abundance_output$abundance_data, celltype_oi = celltype_oi)
+  
+  p1 <- violin_plot
+  p2 <- dotplots_reversed$pseudobulk_plot
+  p3 <- dotplots_reversed$singlecell_plot
+  
+  print(p1+(p2/p3))
+}
+```
+
+Volcano plot
+```{r fig.width=20, fig.height=9}
+logFC_threshold <- 1
+alpha <- 0.05
+
+p1 <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+  filter(contrast == "M-F") %>%
+  ggplot(aes(x = logFC, y = -log10(p_adj.loc), label = gene)) +
+  geom_point(aes(color = case_when(
+    abs(logFC) > logFC_threshold & p_adj.loc < alpha ~ "red",
+    abs(logFC) > logFC_threshold & p_adj.loc > alpha ~ "pink",
+    abs(logFC) < logFC_threshold & p_adj.loc < alpha ~ "pink",
+    TRUE ~ "gray")), size = 3) + 
+  geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed", color = "gray", size = 0.5) +  # Vertical lines for logFC thresholds
+  geom_hline(yintercept = -log10(alpha), linetype = "dashed", color = "gray", size = 0.5) +  # Horizontal line for adjusted p-value threshold
+  labs(x = "logFC", y = "-log10(adj. p-value)",
+       title = "Significance of All DEGs") +
+    ggrepel::geom_text_repel(data = DEGs_table, label.padding = 1, box.padding = 0.4, nudge_x = 0.5, size = 3, color = "black") +
+    scale_color_manual(values = c("grey", "pink", "red"), labels = c("NS", "adj.p-value or logFC", "Significant")) +
+    guides(color = guide_legend(title = "Significance")) +
+    theme(legend.position = "bottom")
+
+p2 <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+  filter(contrast == "M-F") %>%
+  ggplot(aes(x = logFC, y = -log10(p_adj.loc), label = gene)) +
+  geom_point(aes(color = ifelse(abs(logFC) < logFC_threshold | p_adj.loc > alpha, "gray", cluster_id)), size = 3) +
+  geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed", color = "gray", size = 0.5) +  # Vertical lines for logFC thresholds
+  geom_hline(yintercept = -log10(alpha), linetype = "dashed", color = "gray", size = 0.5) +  # Horizontal line for adjusted p-value threshold
+  labs(x = "logFC", y = "-log10(adj. p-value)",
+       title = "DEGs in All Cell Types") +
+  ggrepel::geom_text_repel(data = DEGs_table, label.padding = 1, box.padding = 0.4, nudge_x = 0.5, size = 3, color = "black") +
+  scale_color_manual(values = ct_colors) +  # Set custom colors for cluster_id
+  guides(color = guide_legend(title = "Cluster_id")) +
+  theme(legend.position = "bottom")
+
+p1+p2
+```
+
+
+```{r fig.width=20, fig.height=9}
+p_list <- list()
+
+for (ct in unique(muscat_output$celltype_de$celltype_de$de_output_tidy$cluster_id)){
+  p <- muscat_output$celltype_de$celltype_de$de_output_tidy %>%
+    filter(contrast == "M-F") %>%
+    filter(cluster_id == ct) %>%
+    ggplot(aes(x = logFC, y = -log10(p_adj.loc), label = gene)) +
+    geom_point(aes(color = case_when(
+      abs(logFC) > logFC_threshold & p_adj.loc < alpha ~ "red",
+      abs(logFC) > logFC_threshold & p_adj.loc > alpha ~ "pink",
+      abs(logFC) < logFC_threshold & p_adj.loc < alpha ~ "pink",
+      TRUE ~ "gray")), size = 3) + 
+    geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed", color = "gray", size = 0.5) +  # Vertical lines for logFC thresholds
+    geom_hline(yintercept = -log10(alpha), linetype = "dashed", color = "gray", size = 0.5) +  # Horizontal line for adjusted p-value threshold
+    labs(x = "logFC", y = "-log10(adj. p-value)",
+         title = paste0("DEGs in ", ct)) +
+    ggrepel::geom_text_repel(data = subset(DEGs_table, cluster_id == ct),
+                    label.padding = 1, box.padding = 0.4, nudge_x = 0.5, size = 3, color = "black") +
+    scale_color_manual(values = c("grey", "pink", "red"), labels = c("NS", "adj.p-value or logFC", "Significant")) +
+    guides(color = guide_legend(title = "Significance")) +
+    theme(legend.position = "bottom")
+  p_list[[ct]] <- p
+}
+
+p3 <- wrap_plots(p_list, ncol = 5)
+p3
+```
+
+# Patchwork
+```{r fig.width=20, fig.height=18}
+layout <- "
+AB
+CC
+"
+
+wrap_plots(p1, p2, p3) +  plot_annotation(tag_levels = 'A') + plot_layout(design = layout, guides = "collect") & theme(legend.position = "bottom")
+```
+
+# Save
+```{r}
+output_dir <- "data/processed_data/guilliams_liver/"
+date <- format(Sys.Date(), "%Y%m%d")
+```
+
+## Set output file
+```{r eval=FALSE}
+#set cell type from here (cell_type or simp_cell_type)
+write.table(DEGs_table, file = file.path(output_dir, paste0("muscat_DEGs_allCellType_", date, ".csv")),sep = ",", row.names = FALSE)
+save(muscat_output, file = file.path(output_dir, paste0("muscat_output_allCellType_", date, ".RData")))
+```
+
+# Notes
+```{r}
+sessionInfo()
+```

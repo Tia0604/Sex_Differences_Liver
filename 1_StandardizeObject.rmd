@@ -1,0 +1,1011 @@
+---
+title: Standardize the Seurat Object
+author: Tianze Cao
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(ggridges)
+  library(dplyr)
+  library(magrittr)
+  library(kableExtra)
+  source("code/scripts/SexAssignment.R")
+  library(org.Hs.eg.db)
+  library(patchwork)
+  library(wesanderson)
+})
+```
+
+## Set input file
+```{r}
+input <- "data/raw_data/guilliams_liver_2022.rds"
+raw <- readRDS(input)
+```
+
+# Standarize seurat object
+```{r}
+if (grepl("disco", input)) {
+  #restore data slot
+  raw@assays$RNA@data <- raw@assays$RNA@counts
+}
+
+if (grepl("caq", input)) {
+  raw@assays$RNA <- raw@assays$originalexp
+  colnames(raw@meta.data)[colnames(raw@meta.data) == 'cell_type'] <- 'cell_type_unhormonized'
+}
+
+#if the object is seurat v5
+raw@meta.data <- raw@meta.data %>%
+  mutate_all(as.character)
+```
+
+## Set preparation is needed
+```{r eval=TRUE}
+#if there is not nFeature, nCount
+raw@meta.data$nCount_RNA = colSums(x = raw, slot = "counts")
+raw@meta.data$nFeature_RNA = colSums(x = GetAssayData(object = raw, slot = "counts") > 0)
+
+#if have to convert from Ensembl gene id to Symbol
+#TO DO: converted mitochondrial genes lost hyphen.
+#gene_id <- select(org.Hs.eg.db, keys = rownames(raw), keytype = 'ENSEMBL', columns = 'SYMBOL') %>%
+ # .[!duplicated(.$ENSEMBL), ]
+#raw@assays[["RNA"]]@counts@Dimnames[[1]] <- ifelse(is.na(gene_id$SYMBOL), gene_id$ENSEMBL, gene_id$SYMBOL)
+#raw@assays[["RNA"]]@data@Dimnames[[1]] <- ifelse(is.na(gene_id$SYMBOL), gene_id$ENSEMBL, gene_id$SYMBOL)
+
+#if somewhere has Symbol
+raw@assays[["RNA"]]@counts@Dimnames[[1]] <- raw@assays[["RNA"]]@meta.features[["feature_name"]]
+raw@assays[["RNA"]]@data@Dimnames[[1]] <- raw@assays[["RNA"]]@meta.features[["feature_name"]]
+
+#if there is not percent.mt
+raw[["percent.mt"]] = PercentageFeatureSet(raw, pattern = "^MT-")
+```
+
+## Uniform attribute names
+```{r}
+colnames(raw@meta.data)
+```
+
+### Set the names in metadata
+```{r}
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'development_stage'] <- 'age'
+colnames(raw@meta.data)[colnames(raw@meta.data) == ''] <- 'sex'
+raw@meta.data$sex[raw@meta.data$sex == 'female'] <- 'F'
+raw@meta.data$sex[raw@meta.data$sex == 'male'] <- 'M'
+
+
+
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'nFeature_RNA'] <- 'nFeature'
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'nCount_RNA'] <- 'nCount'
+colnames(raw@meta.data)[colnames(raw@meta.data) == ''] <- 'percent.mt'
+
+
+
+#make sure one donor one eligible sample
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'donor_id'] <- 'sample_id'
+
+colnames(raw@meta.data)[colnames(raw@meta.data) == ''] <- 'project_id'
+
+#if have multiple cell type annotation
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'cell_type'] <- 'cellxgene_cell_type'
+
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'author_cell_type'] <- 'cell_type'
+colnames(raw@meta.data)[colnames(raw@meta.data) == 'assay'] <- 'platform'
+raw@meta.data$platform <- gsub("'", "", raw@meta.data$platform)
+raw@meta.data$platform <- gsub(" ", "", raw@meta.data$platform)
+```
+
+```{r}
+colnames(raw@meta.data)
+```
+
+## Set suitable condition
+variables for liver: age, obesity, virus, alcohol consumption, sampling site, region.
+```{r}
+#set the condition
+con <- c(quo(typeSample), quo(reported_diseases), quo(diet))
+
+if ('project_id' %in% colnames(raw@meta.data)) {
+  for (i in seq_along(con)) {
+    raw@meta.data %>%
+      group_by(!!con[[i]]) %>%
+      summarise(
+        count = n_distinct(sample_id),
+        project_id = toString(unique(project_id)),
+        sample_id = toString(unique(sample_id))
+      ) %>%
+      print()
+  }
+} else {
+  for (i in seq_along(con)) {
+    raw@meta.data %>%
+      group_by(!!con[[i]]) %>%
+      summarise(
+        count = n_distinct(sample_id),
+        sample_id = toString(unique(sample_id))
+      ) %>%
+      print()
+  }
+}
+```
+
+### Set the state of condition
+```{r}
+se <- raw
+
+#select cells based on their state of condition
+se <- subset(se, typeSample == "scRnaSeq")
+```
+
+```{r}
+#only keep projects with at least 6 samples
+if ('project_id' %in% colnames(se@meta.data)) {
+  proj_df <- se@meta.data %>%
+    group_by(project_id) %>%
+    reframe('count' = n_distinct(sample_id), 'sample_id' = toString(unique(sample_id)))
+  projs <- proj_df$project_id[proj_df$count >= 6]
+  se <- subset(se, subset = project_id %in% projs)
+  proj_df
+}
+```
+
+### Set projects after curation
+Project manual curation:
+x - Disco liver:
+  x - E-MTAB-7407 (fetal)
+  x - GSE156625 (after removing fetal samples, M:F = 7:2)
+x - caq liver:
+  x - E-MTAB-11536, 1b9d8702-5af8-4142-85ed-020eb06ec4f6 --> https://cellxgene.cziscience.com/collections/62ef75e4-cbea-454e-a0ce-998ec40223d3 (M:F = 5:2)
+  x- GSE185477, ddb22b3d-a75c-4dd1-9730-dff7fc8ca530 --> https://cellxgene.cziscience.com/collections/44531dd9-1388-4416-a117-af0a99de2294 (4 donors)
+cellxgene liver:
+  https://www.sciencedirect.com/science/article/pii/S0092867421014811?via%3Dihub --> adjacent healthy tissue, table s6 has live histology assessed --> donors pass assessment: H02, H06, H07, H10, H16, H22.
+```{r}
+if ('project_id' %in% colnames(se@meta.data)) {
+  se <- subset(se, subset = project_id == "1b9d8702-5af8-4142-85ed-020eb06ec4f6")
+} else {
+  se <- subset(se, subset = sample_id %in% c("H02", "H06", "H07", "H10", "H16", "H22"))
+}
+```
+
+After condition control:
+```{r}
+if ('project_id' %in% colnames(se@meta.data)) {
+  for (i in seq_along(con)) {
+    se@meta.data %>%
+      group_by(!!con[[i]]) %>%
+      summarise(
+        count = n_distinct(sample_id),
+        project_id = toString(unique(project_id)),
+        sample_id = toString(unique(sample_id))
+      ) %>%
+      print()
+  }
+} else {
+  for (i in seq_along(con)) {
+    se@meta.data %>%
+      group_by(!!con[[i]]) %>%
+      summarise(
+        count = n_distinct(sample_id),
+        sample_id = toString(unique(sample_id))
+      ) %>%
+      print()
+  }
+}
+```
+
+## Customize cell types
+```{r}
+kbl(t(table(se@meta.data$cell_type))) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "150px")
+```
+
+### Set simplified cell types
+```{r eval=FALSE}
+#disco_lung
+myeloid_cell <- c("G2/M phase myeloid cell", "S phase myeloid cell")
+
+macrophage <- c("M1 macrophage", "Alveolar macrophage", "LYVE1 macrophage")
+
+dendritic_cell <- c("mregDC", "cDC1", "cDC2")
+
+monocyte <- c("CD14 monocyte", "CD16 monocyte")
+
+b_cell <- c("Naive B cell", "Memory B cell", "Plasma cell")
+
+mast_cell <- c("Mast cell")
+
+nk_cell <- c("CD16 NK cell")
+
+t_cell <- c("Memory CD4 T cell", "Naive CD4 T cell", "GZMB CD8 T cell", "GZMK CD8 T cell", "Treg cell")
+
+t_nk_cell <- "Cycling T/NK cell"
+
+non_immune_cell <- c("Aerocyte", "Airway basal cell", "Arterial EC", "AT1", "AT2", "Capillary EC", "CDC20B+ Multiciliated cell", "Club cell", "CXCL14+POSTN+ fibroblast", "Cycling AT2", "FBLN2+APOD+ fibroblast", "Goblet cell", "G0S2+PPP1R14A+ fibroblast", "IGFBP6+APOD+ fibroblast", "Lymphatic EC", "Multiciliated cell", "Myofibroblast", "Neuroendocrine cell", "Neuron", "Pericyte", "PLA2G2A+IGFBP4+APOC1+ fibroblast", "Red blood cell", "Vascular smooth muscle cell", "Venous EC")
+```
+
+```{r eval=FALSE}
+#disco_liver
+
+# Define non-immune cell types
+non_immune_cell <- c(
+  "CXCL6+ cholangiocyte",
+  "Arterial EC",
+  "TFF+ cholangiocyte",
+  "SPINK1+SGMS2+ cholangiocyte",
+  "Vascular smooth muscle cell",
+  "Venous EC",
+  "Hepatocyte",
+  "Lymphatic EC",
+  "Capillary EC",
+  "Pericyte",
+  "Fibroblast",
+  "Glial cell"
+)
+
+# Define progenitor cell types
+progenitor_cell <- c(
+  "Common myeloid progenitor",
+  "Common lymphoid progenitor",
+  "Granulocyte-monocyte progenitor",
+  "Megakaryocyte progenitor",
+  "AFP+ fetal hepatocyte",
+  "Late hemoglobin+ erythroblast",
+  "Intermediate EPCAM+ erythroblast"
+)
+
+# Define myeloid cell types
+myeloid_cell <- c(
+)
+
+# Define macrophage cell types
+macrophage <- c(
+  "LYVE1 macrophage",
+  "M1 macrophage",
+  "Cycling LYVE1 macrophage"
+)
+
+# Define dendritic cell types
+dendritic_cell <- c(
+  "Lymphoid pre-pDC",
+  "pDC",
+  "Cycling cDC2",
+  "Myeloid pre-pDC",
+  "cDC1",
+  "cDC2"
+)
+
+# Define monocyte cell types
+monocyte <- c(
+  "MHCII low CD14 monocyte",
+  "MHCII high CD14 monocyte",
+  "CD16 monocyte"
+)
+
+# Define B cell types
+b_cell <- c(
+  "Naive B cell",
+  "ProB cell",
+  "Cycling preB cell",
+  "PreB cell",
+  "Plasma cell"
+)
+
+# Define mast cell type
+mast_cell <- c(
+  "Mast cell"
+)
+
+# Define NK cell types
+nk_cell <- c(
+  "CD16 NK cell",
+  "CD56 NK cell"
+)
+
+# Define T cell types
+t_cell <- c(
+  "MAIT cell",
+  "Memory CD4 T cell",
+  "Naive CD8 T cell",
+  "Naive CD4 T cell",
+  "GZMB CD8 T cell",
+  "GZMK+IL7R+ CD8 T cell",
+  "GZMK+IL7R- CD8 T cell",
+  "Treg cell"
+)
+
+# Define T/NK cell type
+t_nk_cell <- "Cycling T/NK cell"
+
+# Define ILC (Innate Lymphoid Cell) type
+ilc <- "ILC"
+```
+
+```{r eval=TRUE}
+#guilliams_liver
+
+neutrophil <- c("Neutrophils")
+
+basophil <- c("Basophils")
+
+monocyte <- c("Mono+mono derived cells")
+
+macrophage <- c("Macrophages")
+
+dendritic_cell <- c("Mig.cDCs", "cDC1s", "cDC2s")
+
+plasma_dc <- c("pDCs")
+
+b_cell <- c("B cells", "Plasma cells")
+
+t_cell <- c("T cells")
+
+t_nk_cell <- "Circulating NK/NKT"
+
+nk_cell <- c("Resident NK")
+
+non_immune_cell <- c("Hepatocytes", "Cholangiocytes", "Endothelial cells", "Fibroblasts")
+```
+
+```{r}
+#add simplified cell type to metadata
+simp_cell_type <- ifelse(se$cell_type %in% neutrophil, "Neutrophil",
+                         ifelse(se$cell_type %in% basophil, "Basophil",
+                            ifelse(se$cell_type %in% monocyte, "Monocyte",
+                              ifelse(se$cell_type %in% macrophage, "Macrophage",
+                                ifelse(se$cell_type %in% dendritic_cell, "Dendritic cell",
+                                  ifelse(se$cell_type %in% plasma_dc, "Plasma dendritic cell",
+                                    ifelse(se$cell_type %in% b_cell, "B cell",
+                                      ifelse(se$cell_type %in% t_cell, "T cell",
+                                        ifelse(se$cell_type %in% t_nk_cell, "Cycling T/NK cell",
+                                          ifelse(se$cell_type %in% nk_cell, "NK cell",
+                                            ifelse(se$cell_type %in% non_immune_cell, "Non-immune cell","NA")))))))))))
+
+se@meta.data$simp_cell_type <- simp_cell_type
+```
+
+```{r}
+kbl(t(table(se@meta.data$simp_cell_type))) %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "120px")
+```
+
+#### Set order and colors
+```{r}
+simp_ct_order <- c("NK cell", "Cycling T/NK cell", "T cell", "B cell", "Plasma dendritic cell", "Dendritic cell", "Macrophage", "Monocyte", "Basophil", "Neutrophil")
+
+gradient_palette <- colorRampPalette(c("#5A5FFA", "#E442A6", "orange", "#3B7A2B"))
+
+simp_gradient_colors <- gradient_palette(length(simp_ct_order))
+
+simp_ct_colors <- setNames(simp_gradient_colors, simp_ct_order)
+
+simp_ct_colors["Non-immune cell"] <- "grey"
+```
+
+```{r}
+ct_order <- c(nk_cell, t_nk_cell, t_cell, b_cell, plasma_dc, dendritic_cell, macrophage, monocyte, basophil, neutrophil)
+
+gradient_palette <- colorRampPalette(c("#5A5FFA", "#E442A6", "orange", "#3B7A2B")) 
+
+gradient_colors <- gradient_palette(length(ct_order))
+
+ct_colors <- setNames(gradient_colors, ct_order)
+
+ct_colors[non_immune_cell] <- "grey"
+```
+
+```{r message=FALSE}
+if (!("umap" %in% names(se@reductions))){
+  se <- SCTransform(se, assay = "RNA", verbose = FALSE)
+  se = RunPCA(se, verbose = FALSE)
+  se = FindNeighbors(se, dims = 1:50, verbose = FALSE)
+  se = FindClusters(se, resolution = 0.5, algorithm = 2, verbose = FALSE)
+  se = RunUMAP(se, dims = 1:50, verbose = FALSE)
+}
+```
+
+```{r fig.width=8, fig.height=9}
+DimPlot(se, reduction = "umap", group.by = "cell_type", label = TRUE, raster = FALSE) +
+  scale_color_manual(values = ct_colors) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 10))
+```
+
+```{r fig.width=8, fig.height=9}
+DimPlot(se, reduction = "umap", group.by = "simp_cell_type", label = TRUE, raster = FALSE) +
+  scale_color_manual(values = simp_ct_colors) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#remove non-immune cells
+se <- subset(se, subset = simp_cell_type != "Non-immune cell")
+```
+
+# Describe available samples
+## Sexes
+```{r}
+se@meta.data %>%
+  group_by(sex) %>%
+  reframe('count' = n_distinct(sample_id), 'sample_id' = toString(unique(sample_id))) %>%
+  kbl() %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+### Sex assignment
+```{r message=FALSE}
+load("data/processed_data/guilliams_liver/sexAssign_output_20240513.RData")
+#sex_assign_out <- SexAssign(data = se,
+ #                           sex_col = "sex",
+  #                          sample_col = "sample_id",
+   #                         do.report = TRUE,
+    #                        assay = "RNA",
+     #                       min.percent = 0.7, # minimum percentage of cells
+      #                      min.ratio = 2 # mininum ratio between the sexes
+#)
+```
+
+```{r}
+prev_sex <- se@meta.data %>%
+        distinct(sample_id, sex) %>%
+        dplyr::count(sex) %>%
+        mutate(var = "Provided\nsex annotation") %>%
+        dplyr::rename(predicted_sex = sex) %>%
+        mutate(predicted_sex = ifelse(predicted_sex == "", "Not provided", predicted_sex))
+pred_sex <- sex_assign_out[[1]]@meta.data %>%
+        distinct(sample_id, predicted_sex) %>%
+        dplyr::count(predicted_sex) %>%
+        mutate(var="SexAssign\nprediction")
+sex_annot <- bind_rows(prev_sex, pred_sex)
+sex_annot_bar <- sex_annot %>%
+        ggplot( aes(fill=factor(predicted_sex, c("F", "Not provided", "inconclusive", "M")), y=n, x=var, label = n)) +
+        geom_bar(position="fill", stat="identity") +
+        geom_text(size = 8, position = position_fill(vjust = 0.5)) +
+        # change text
+        labs(x = "",
+             y = "Proportion of samples",
+             # title = "Sex annotation vs. SexAssign prediction",
+             fill = "Sample sex") +
+        theme_classic() +
+        scale_fill_manual(values = c("M" = "gold", "F" = "purple", "Not provided" = "darkgray", "inconclusive" = "lightgray"),
+                          labels = c( "inconclusive" = "Inconclusive", "F" = "Female", "M" = "Male"))
+
+mismatch_barplot <- as.data.frame(sex_assign_out[[2]]) %>%
+  # make match column factor
+    mutate(match = factor(match, c("New_annotation", "Mismatch",  "Match" ))) %>%
+  dplyr::count(match) %>%
+  mutate(var="") %>%
+  ggplot(aes(fill=factor(match, c("Match", "Mismatch", "New_annotation")), x=var, y=n, label = n)) +
+    geom_bar(position="fill", stat="identity") +
+    geom_text(size = 8, position = position_fill(vjust = 0.5)) +
+    # change text
+    labs(x="",
+         y="Proportion of samples",
+         # title = "Mismatches in sample sex",
+         fill = "") +
+    theme_classic() +
+    scale_fill_manual(values = c("Match" = "#90ee90", "Mismatch" = "#ff0033", "New_annotation" = "#4169E1"),
+                      labels = c("New_annotation" = "New annotation"))
+```
+
+#### Assigned result
+```{r fig.width=7, fig.height=4}
+sa <- sex_annot_bar + mismatch_barplot
+sa
+```
+
+```{r fig.width=10, fig.height=8}
+freq <- sex_assign_out[[3]]
+freq
+```
+
+```{r}
+inconclusive_rows <- which(sex_assign_out[[2]]$assigned_sex == "inconclusive")
+
+kbl(sex_assign_out[[2]], caption = "Assigned results for all samples") %>%
+  kable_paper() %>%
+  row_spec(row = inconclusive_rows, bold = TRUE, color = "white", background = "#D7261E") %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+#### Heatmap of specific X, Y genes
+```{r fig.width=10, fig.height=12, eval=FALSE}
+hm <- sex_assign_out[[4]]
+hm
+```
+<details>
+  <summary>Details</summary>
+    ```{r fig.width=10, fig.height=12, echo=FALSE, eval=TRUE}
+    hm <- sex_assign_out[[4]]
+    hm
+    ```
+</details>
+
+### Set default sex
+inconclusive samples removed
+```{r}
+se <- sex_assign_out[[1]]
+colnames(se@meta.data)[colnames(se@meta.data) == 'sex'] <- 'orig_sex'
+colnames(se@meta.data)[colnames(se@meta.data) == 'predicted_sex'] <- 'sex'
+
+se <- subset(se, subset = sex != 'inconclusive')
+```
+
+```{r}
+se@meta.data %>%
+  group_by(sex) %>% #set the condition
+  reframe('count' = n_distinct(sample_id), 'sample_id' = toString(unique(sample_id))) %>%
+  kbl() %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "300px")
+```
+
+## Ages
+```{r fig.width=4, fig.height=4}
+if ('project_id' %in% colnames(se@meta.data)) {
+  age_distr_sex_proj <- se@meta.data %>%
+    ggplot(aes(x = age, y=project_id, fill = factor(sex))) +
+    geom_density_ridges(alpha = 0.5, rel_min_height = 0.01) +
+    labs(x = "Age", y = "Density",
+         title = "Age distribution for Males and Females per project",
+         fill = "Sex")
+  age_distr_sex_proj
+} else {
+  age_distr_sex_proj <- se@meta.data %>%
+    ggplot(aes(x = age, y=..density.., fill = factor(sex))) +
+    geom_density(alpha = 0.5) +
+    labs(x = "Age", y = "Density",
+         title = "Age distribution for Males and Females",
+         fill = "Sex") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  age_distr_sex_proj
+}
+```
+
+```{r}
+if ('project_id' %in% colnames(se@meta.data)) {
+  se@meta.data %>%
+    group_by(age) %>%
+    reframe('project'= toString(unique(project_id)),'size' = n_distinct(sample_id), 'sex' = toString(unique(sex))) %>%
+    kbl() %>%
+    kable_paper() %>%
+    scroll_box(width = "620px", height = "300px")
+} else {
+  se@meta.data %>%
+    group_by(age) %>%
+    reframe('size' = n_distinct(sample_id), 'sex' = toString(unique(sex))) %>%
+    kbl() %>%
+    kable_paper() %>%
+    scroll_box(width = "620px", height = "300px")
+}
+```
+
+## Cell counts
+### Minimum cell counts per sample
+```{r}
+cell_count = 200
+```
+
+```{r eval=TRUE}
+sample_cell_counts <- table(se@meta.data$sample_id)
+
+# Get the names of samples with more than 200 cells
+samples_to_keep <- names(sample_cell_counts[sample_cell_counts >= cell_count])
+
+# Subset the Seurat object to include only cells from samples above 200 cells
+se <- subset(se, subset = sample_id %in% samples_to_keep)
+```
+
+```{r}
+setf <- se@meta.data$sex == "F"
+setm <- se@meta.data$sex == "M"
+
+f.cells <- colnames(se)[setf]
+m.cells <- colnames(se)[setm]
+
+f.subset <- subset(se, cells = f.cells)
+m.subset <- subset(se, cells = m.cells)
+```
+
+```{r}
+f_ids <- unique(f.subset$sample_id)
+m_ids <- unique(m.subset$sample_id)
+ids <- c(m_ids, f_ids)
+se$sample_id <- factor(se$sample_id, levels = ids)
+
+gradient_palette <- colorRampPalette(c("#0050A0", "grey", "#C64700"))
+colors <- gradient_palette(length(unique(se$sample_id)))
+```
+
+```{r fig.height=4, fig.width=5}
+if ('project_id' %in% colnames(se@meta.data)) {
+  ggplot(se@meta.data, aes(x = sample_id, fill = sex)) +
+    geom_bar() +
+    facet_wrap(~ project_id, scales = "free_x", ncol = 3) +
+    geom_hline(yintercept = cell_count, color = "black", linetype = "dashed", size = 1) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "sample_id", y = "Count", title = "Cell counts")
+} else {
+  cc <- ggplot(se@meta.data, aes(x = sample_id, fill = sample_id)) +
+    geom_bar(position = "dodge") +
+    geom_hline(yintercept = cell_count, color = "black", linetype = "dashed", size = 1) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Sample ID", y = "Count") +
+    scale_fill_manual(values = colors) +
+    theme_minimal()
+}
+cc
+```
+
+```{r}
+kbl(t(table(f.subset@meta.data$sample_id)), caption = "Number of immune cells in female samples") %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "120px")
+
+
+kbl(t(table(m.subset@meta.data$sample_id)), caption = "Number of immune cells in male samples") %>%
+  kable_paper() %>%
+  scroll_box(width = "620px", height = "120px")
+```
+
+## Projects (require project_id)
+```{r fig.width=8, fig.height=6}
+if ('project_id' %in% colnames(se@meta.data)) {
+  cell_counts <- se@meta.data %>%
+    group_by(project_id) %>%
+    reframe(cell_count = n())
+  
+  sex_counts <- se@meta.data %>%
+    group_by(project_id, sex) %>%
+    reframe(size = n_distinct(sample_id)) %>%
+    pivot_wider(names_from = sex, values_from = size, names_prefix = "size_") %>%
+    mutate(size_F = ifelse(is.na(size_F), 0, size_F),
+           size_M = ifelse(is.na(size_M), 0, size_M))
+
+  project_data <- sex_counts %>%
+    mutate(size = size_F + size_M,
+           sex_ratio = round(size_F / (size_F + size_M), 2)) %>%
+    arrange(desc(sex_ratio)) %>%
+    full_join(cell_counts, by = "project_id")
+  
+  ggplot(project_data, aes(x = sex_ratio, y = size, color = project_id, size = cell_count)) +
+    geom_point() +
+    geom_text(aes(label = project_id), vjust = -1.8, size = 2.5) +
+    labs(x = "Sex Ratio F/(F+M)", y = "Sample Size (F+M)", color = "Project ID", size = "Cell Count") +
+    scale_y_continuous(breaks = seq(0, max(project_data$size), by = 1)) +
+    theme_minimal() +
+    guides(color = FALSE) +
+    xlim(0, 1)
+}
+```
+
+### Set project criteria
+```{r}
+if ('project_id' %in% colnames(se@meta.data)) {
+  proj_criteria <- project_data$size_F < 3 | project_data$size_M < 3 | project_data$cell_count < 1000
+  
+  bad_proj <- project_data$project_id[proj_criteria]
+  bad_proj_row <- which(proj_criteria)
+
+  kbl(project_data) %>%
+    kable_paper() %>%
+    row_spec(row = bad_proj_row, bold = TRUE, color = "white", background = "#D7261E") %>%
+    scroll_box(width = "620px", height = "300px")
+}
+```
+
+```{r}
+#remove projects in bad_proj
+if ('project_id' %in% colnames(se@meta.data)) {
+se <- subset(se, subset = project_id %in% bad_proj, invert = TRUE)
+}
+```
+
+```{r fig.width=8, fig.height=6}
+if ('project_id' %in% colnames(se@meta.data)) {
+  cell_counts <- se@meta.data %>%
+    group_by(project_id) %>%
+    reframe(cell_count = n())
+  
+  sex_counts <- se@meta.data %>%
+    group_by(project_id, sex) %>%
+    reframe(size = n_distinct(sample_id)) %>%
+    pivot_wider(names_from = sex, values_from = size, names_prefix = "size_") %>%
+    mutate(size_F = ifelse(is.na(size_F), 0, size_F),
+           size_M = ifelse(is.na(size_M), 0, size_M))
+
+  project_data <- sex_counts %>%
+    mutate(size = size_F + size_M,
+           sex_ratio = round(size_F / (size_F + size_M), 2)) %>%
+    arrange(desc(sex_ratio)) %>%
+    full_join(cell_counts, by = "project_id")
+  
+  ggplot(project_data, aes(x = sex_ratio, y = size, color = project_id, size = cell_count)) +
+    geom_point() +
+    geom_text(aes(label = project_id), vjust = -1.8, size = 2.5) +
+    labs(x = "Sex Ratio F/(F+M)", y = "Sample Size (F+M)", color = "Project ID", size = "Cell Count") +
+    scale_y_continuous(breaks = seq(0, max(project_data$size), by = 1)) +
+    theme_minimal() +
+    guides(color = FALSE) +
+    xlim(0, 1)
+}
+```
+
+# Quality control (QC)
+## Set your threshold from here
+```{r}
+nFeature_min = 200
+nFeature_max = 5000
+
+nCount_min = 500
+nCount_max = 30000
+
+percent.mt_min = 0
+percent.mt_max = 10
+```
+
+```{r fig.width=12, fig.height=4}
+layout(matrix(c(1,2,3), nrow = 1))
+
+nFeature <- se@meta.data[,'nFeature']
+hist(nFeature, breaks = 50)
+# Add vertical lines
+abline(v = mean(nFeature), col = "black", lty = "longdash", lwd = 2)
+# 2nd standard deviation
+abline(v = mean(nFeature) - 2*sd(nFeature), col = "blue", lty = "longdash", lwd = 2)
+abline(v = mean(nFeature) + 2*sd(nFeature), col = "blue", lty = "longdash", lwd = 2)
+abline(v = nFeature_min, col = "red", lty = "longdash", lwd = 2)
+abline(v = nFeature_max, col = "red", lty = "longdash", lwd = 2)
+
+nCount <- se@meta.data[,'nCount']
+hist(nCount, breaks = 50)
+# Add vertical lines
+abline(v = mean(nCount), col = "black", lty = "longdash", lwd = 2)
+# 2nd standard deviation
+abline(v = mean(nCount) - 2*sd(nCount), col = "blue", lty = "longdash", lwd = 2)
+abline(v = mean(nCount) + 2*sd(nCount), col = "blue", lty = "longdash", lwd = 2)
+abline(v = nCount_min, col = "red", lty = "longdash", lwd = 2)
+abline(v = nCount_max, col = "red", lty = "longdash", lwd = 2)
+
+percent.mt <- se@meta.data[,'percent.mt']
+hist(percent.mt, breaks = 50)
+# Add vertical lines
+abline(v = mean(percent.mt), col = "black", lty = "longdash", lwd = 2)
+# 2nd standard deviation
+abline(v = mean(percent.mt) - 2*sd(percent.mt), col = "blue", lty = "longdash", lwd = 2)
+abline(v = mean(percent.mt) + 2*sd(percent.mt), col = "blue", lty = "longdash", lwd = 2)
+abline(v = percent.mt_min, col = "red", lty = "longdash", lwd = 2)
+abline(v = percent.mt_max, col = "red", lty = "longdash", lwd = 2)
+```
+
+```{r fig.width=13, fig.height=4}
+vl1 <- VlnPlot(se, features = "nFeature", pt.size = 0, group.by = "sex", split.by = "sample_id", cols = colors) +
+  geom_hline(aes(yintercept = nFeature_min, color = "threshold"), linetype = "longdash") +
+  geom_hline(aes(yintercept = nFeature_max, color = "threshold"), linetype = "longdash") +
+  labs(color = "") + # Remove title from color legend
+  scale_color_manual(values = c("threshold" = "black"))
+
+vl2 <- VlnPlot(se, features = "nCount", pt.size = 0, group.by = "sex", split.by = "sample_id", cols = colors) +
+  geom_hline(aes(yintercept = nCount_min, color = "threshold"), linetype = "longdash") +
+  geom_hline(aes(yintercept = nCount_max, color = "threshold"), linetype = "longdash") +
+  labs(color = "") + # Remove title from color legend
+  scale_color_manual(values = c("threshold" = "black"))
+
+vl3 <- VlnPlot(se, features = "percent.mt", pt.size = 0, group.by = "sex", split.by = "sample_id", cols = colors) +
+  geom_hline(aes(yintercept = percent.mt_min, color = "threshold"), linetype = "longdash") +
+  geom_hline(aes(yintercept = percent.mt_max, color = "threshold"), linetype = "longdash") +
+  labs(color = "") + # Remove title from color legend
+  scale_color_manual(values = c("threshold" = "black"))
+
+vl <- wrap_plots(vl1,vl2,vl3) + plot_layout(guides = 'collect')
+vl
+```
+
+## Examine data before filtering
+### Samples in the female group
+```{r fig.width=5, fig.height=5, eval=FALSE}
+n <- 0
+f.sample_id <- unique(f.subset@meta.data$sample_id)
+for (i in f.sample_id) {
+  n <- n + 1
+  simp_sample_id <- paste("female", n, sep = "_")
+  
+  n.cells <- colnames(f.subset)[f.subset@meta.data$sample_id == i]
+  n.subset <- subset(f.subset, cells = n.cells)
+  
+  #add simplified sample name to metadata
+  f.subset@meta.data$simp_sample_id[f.subset@meta.data$sample_id == i] <- simp_sample_id
+  se@meta.data$simp_sample_id[se@meta.data$sample_id == i] <- simp_sample_id
+  raw@meta.data$simp_sample_id[raw@meta.data$sample_id == i] <- simp_sample_id
+  
+  Idents(n.subset) <- simp_sample_id
+  p1 <- VlnPlot(n.subset, features = c("nFeature", "nCount"), pt.size = 0)
+  p2 <- FeatureScatter(n.subset, feature1 = "nCount", feature2 = "nFeature")
+  print((p1/p2))
+}
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=5, fig.height=5, echo=FALSE, eval=TRUE}
+    n <- 0
+    f.sample_id <- unique(f.subset@meta.data$sample_id)
+    for (i in f.sample_id) {
+      n <- n + 1
+      simp_sample_id <- paste("female", n, sep = "_")
+  
+      n.cells <- colnames(f.subset)[f.subset@meta.data$sample_id == i]
+      n.subset <- subset(f.subset, cells = n.cells)
+  
+      #add simplified sample name to metadata
+      f.subset@meta.data$simp_sample_id[f.subset@meta.data$sample_id == i] <- simp_sample_id
+      se@meta.data$simp_sample_id[se@meta.data$sample_id == i] <- simp_sample_id
+  
+      Idents(n.subset) <- simp_sample_id
+      print((VlnPlot(n.subset, features = c("nFeature", "nCount"), pt.size = 0)/FeatureScatter(n.subset, feature1 = "nCount", feature2 = "nFeature")))
+    }
+    ```
+</details>
+
+### Sample in the male group
+```{r fig.width=5, fig.height=5, eval=FALSE}
+n <- 0
+m.sample_id <- unique(m.subset@meta.data$sample_id)
+for (i in m.sample_id) {
+  n <- n + 1
+  simp_sample_id <- paste("male", n, sep = "_")
+  
+  n.cells <- colnames(m.subset)[m.subset@meta.data$sample_id == i]
+  n.subset <- subset(m.subset, cells = n.cells)
+  
+  #add simplified sample name to metadata
+  m.subset@meta.data$simp_sample_id[m.subset@meta.data$sample_id == i] <- simp_sample_id
+  se@meta.data$simp_sample_id[se@meta.data$sample_id == i] <- simp_sample_id
+  raw@meta.data$simp_sample_id[raw@meta.data$sample_id == i] <- simp_sample_id
+  
+  Idents(n.subset) <- simp_sample_id
+  p1 <- VlnPlot(n.subset, features = c("nFeature", "nCount"), pt.size = 0)
+  p2 <- FeatureScatter(n.subset, feature1 = "nCount", feature2 = "nFeature")
+  print((p1/p2))
+}
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=5, fig.height=5, echo=FALSE, eval=TRUE}
+    n <- 0
+    m.sample_id <- unique(m.subset@meta.data$sample_id)
+    for (i in m.sample_id) {
+      n <- n + 1
+      simp_sample_id <- paste("male", n, sep = "_")
+      
+      n.cells <- colnames(m.subset)[m.subset@meta.data$sample_id == i]
+      n.subset <- subset(m.subset, cells = n.cells)
+  
+      #add simplified sample name to metadata
+      m.subset@meta.data$simp_sample_id[m.subset@meta.data$sample_id == i] <- simp_sample_id
+      se@meta.data$simp_sample_id[se@meta.data$sample_id == i] <- simp_sample_id
+      
+      Idents(n.subset) <- simp_sample_id
+      p1 <- VlnPlot(n.subset, features = c("nFeature", "nCount"), pt.size = 0)
+      p2 <- FeatureScatter(n.subset, feature1 = "nCount", feature2 = "nFeature")
+      print((p1/p2))
+    }
+    ```
+</details>
+
+
+## Filtering
+```{r}
+set1 <- se$nFeature >= nFeature_min & se$nFeature <= nFeature_max
+set2 <- se$nCount >= nCount_min & se$nCount <= nCount_max
+set3 <- se$percent.mt >= percent.mt_min & se$percent.mt <= percent.mt_max
+
+keep.cells <- colnames(se)[set1 & set2 & set3]
+
+se.subset <- subset(se, cells = keep.cells)
+```
+
+### Examine filtered subset
+```{r}
+# Create tables for number of cells before and after filtering
+before_filtering <- table(se@meta.data$simp_sample_id)
+before_filtering <- data.frame(simp_sample_id = names(before_filtering), Before_Filtering = as.vector(before_filtering))
+
+after_filtering <- table(se.subset@meta.data$simp_sample_id)
+after_filtering <- data.frame(simp_sample_id = names(after_filtering), After_Filtering = as.vector(after_filtering))
+
+# Merge the tables based on row names
+comparison_table <- merge(before_filtering, after_filtering, by = "simp_sample_id", all = TRUE)
+
+# Print the comparison table
+print(comparison_table)
+```
+
+```{r fig.width=5, fig.height=5, eval=FALSE}
+sample_names <- unique(se@meta.data$simp_sample_id)
+
+for (i in sample_names) {
+  mycells <- colnames(se.subset)[se.subset@meta.data$simp_sample_id == i]
+  mysubset <- subset(se.subset, cells = mycells)
+  
+  Idents(mysubset) <- i
+  p1 <- VlnPlot(mysubset, features = c("nFeature", "nCount"), pt.size = 0)
+  p2 <- FeatureScatter(mysubset, feature1 = "nCount", feature2 = "nFeature")
+  print((p1/p2))
+}
+```
+<details>
+  <summary>Details</summary>
+    ```{r, fig.width=5, fig.height=5, echo=FALSE, eval=TRUE}
+    sample_names <- unique(se@meta.data$simp_sample_id)
+
+    for (i in sample_names) {
+     mycells <- colnames(se.subset)[se.subset@meta.data$simp_sample_id == i]
+     mysubset <- subset(se.subset, cells = mycells)
+  
+     Idents(mysubset) <- i
+     p1 <- VlnPlot(mysubset, features = c("nFeature", "nCount"), pt.size = 0)
+     p2 <- FeatureScatter(mysubset, feature1 = "nCount", feature2 = "nFeature")
+     print((p1/p2))
+    }
+    ```
+</details>
+
+# Patchwork
+```{r eval=FALSE}
+nFeature_min = 200
+nFeature_max = 5000
+
+nCount_min = 500
+nCount_max = 30000
+
+percent.mt_min = 0
+percent.mt_max = 10
+
+layout <- "
+AAAAAAAAAA#CCCCCCCCCCCCCCCCCCCCCCCC
+##BBBBBB###DDDDDDDDDDDDDDDDDDDDDDDD
+"
+
+wrap_plots(sa, cc, fp, mp) + plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A", 
+
+                                 caption = "Figure 1. Sex assignments to donors and quality control for cells.") & 
+  theme(plot.caption = ggtext::element_textbox_simple(size = 15))
+```
+
+# Save
+## Set output file
+```{r}
+se <- se.subset
+output_dir <- "data/processed_data/guilliams_liver/"
+date <- format(Sys.Date(), "%Y%m%d")
+```
+
+```{r eval=FALSE}
+saveRDS(se, file = file.path(output_dir, paste0("standardized_3m3f_", date, ".rds")), compress = FALSE)
+save(ct_colors, simp_ct_colors, ct_order, simp_ct_order, file = file.path(output_dir, paste0("cellType_", date, ".RData")))
+save(sex_assign_out, file = file.path(output_dir, paste0("sexAssign_output_", date, ".RData")))
+```
+
+# Notes
+```{r}
+sessionInfo()
+```

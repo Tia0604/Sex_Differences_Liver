@@ -1,0 +1,586 @@
+---
+title: Sex Differential Expression Analysis
+author: "Tianze Cao"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+#set to project dir
+knitr::opts_knit$set(root.dir = "/home/ti4104ca/Projects/Mine")
+knitr::opts_chunk$set(echo = TRUE, results = 'hold', fig.show = 'hold', warning = FALSE)
+options(future.globals.maxSize= 10000*1024^2)
+```
+
+# Load
+## Libraries
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SingleCellExperiment)
+  library(dplyr)
+  library(ggplot2)
+  library(ggraph)
+  library(igraph)
+  library(tidygraph)
+  library(muscatWrapper)
+  library(nichenetr)
+  library(multinichenetr)
+  library(circlize)
+  library(kableExtra)
+  library(patchwork)
+  source("code/scripts/multinichenet_circos.R")
+  source("code/scripts/multinichenet_network.R")
+})
+```
+
+## Set input file
+```{r}
+input <- "data/processed_data/guilliams_liver/integrated_3m3f_20240423.rds"
+se <- readRDS(input)
+load("data/processed_data/guilliams_liver/cellType_20240513.RData")
+```
+
+## Database
+Ligand-receptor network (lr_network) and ligand-target matrix (ligand_target_matrix)
+```{r}
+organism = "human"
+```
+
+```{r}
+options(timeout = 120)
+
+if(organism == "human"){
+  
+  lr_network_all = 
+    readRDS(url(
+      "https://zenodo.org/record/10229222/files/lr_network_human_allInfo_30112033.rds"
+      )) %>% 
+    mutate(
+      ligand = convert_alias_to_symbols(ligand, organism = organism), 
+      receptor = convert_alias_to_symbols(receptor, organism = organism))
+  
+  lr_network_all = lr_network_all  %>% 
+    mutate(ligand = make.names(ligand), receptor = make.names(receptor)) 
+  
+  lr_network = lr_network_all %>% 
+    distinct(ligand, receptor)
+  
+  ligand_target_matrix = readRDS(url(
+    "https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final.rds"
+    ))
+  
+  colnames(ligand_target_matrix) = colnames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  rownames(ligand_target_matrix) = rownames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  
+  lr_network = lr_network %>% filter(ligand %in% colnames(ligand_target_matrix))
+  ligand_target_matrix = ligand_target_matrix[, lr_network$ligand %>% unique()]
+  
+} else if(organism == "mouse"){
+  
+  lr_network_all = readRDS(url(
+    "https://zenodo.org/record/10229222/files/lr_network_mouse_allInfo_30112033.rds"
+    )) %>% 
+    mutate(
+      ligand = convert_alias_to_symbols(ligand, organism = organism), 
+      receptor = convert_alias_to_symbols(receptor, organism = organism))
+  
+  lr_network_all = lr_network_all  %>% 
+    mutate(ligand = make.names(ligand), receptor = make.names(receptor)) 
+  lr_network = lr_network_all %>% 
+    distinct(ligand, receptor)
+  
+  ligand_target_matrix = readRDS(url(
+    "https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds"
+    ))
+  
+  colnames(ligand_target_matrix) = colnames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  rownames(ligand_target_matrix) = rownames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  
+  lr_network = lr_network %>% filter(ligand %in% colnames(ligand_target_matrix))
+  ligand_target_matrix = ligand_target_matrix[, lr_network$ligand %>% unique()]
+  
+}
+```
+
+Convert the gene symbols used in the our dataset to make them recognizable in NicheNet 2.0. networks
+```{r message=FALSE}
+#make cell type names into syntactically valid R names (space->dot)
+se$cell_type <- make.names(se$cell_type)
+se$simp_cell_type <- make.names(se$simp_cell_type)
+ct_order <- make.names(ct_order)
+simp_ct_order <- make.names(simp_ct_order)
+names(ct_colors)<- make.names(names(ct_colors))
+names(simp_ct_colors)<- make.names(names(simp_ct_colors))
+
+sce <- as.SingleCellExperiment(se, assay = "RNA")
+sce = alias_to_symbol_SCE(sce, "human") %>% makenames_SCE()
+```
+
+# MultiNicheNet
+https://github.com/saeyslab/multinichenetr/blob/main/vignettes/pairwise_analysis_MISC.md
+## Preparation
+### Set covariates from here
+project: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE135893
+```{r}
+sample_id <- "sample_id"
+group_id <- "sex"
+
+#set cell type from here
+celltype_id <- "cell_type"
+#celltype_id <- "simp_cell_type"
+#ct_order <- simp_ct_order
+#ct_colors <- simp_ct_colors
+
+covariates = NA
+batches = "platform"
+```
+
+Define sender and receiver cell types
+```{r}
+#all vs all
+cell_types <- c(
+  "Plasma.cells",
+  "T.cells",
+  "B.cells",
+  "Neutrophils",
+  "Mono.mono.derived.cells",
+  "Macrophages",
+  "cDC2s",
+  "cDC1s",
+  "Mig.cDCs",
+  "pDCs",
+  "Circulating.NK.NKT",
+  "Resident.NK",
+  "Basophils"
+)
+
+senders_oi = cell_types
+receivers_oi = cell_types
+#some issue when knitting 20240514
+#senders_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+#receivers_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+
+#If not all the cell types, subset sce
+#sce = sce[, SummarizedExperiment::colData(sce)[,celltype_id] %in% c(senders_oi, receivers_oi)]
+```
+
+### Set analysis parameters
+```{r}
+#samples with inconclusive sex are removed
+contrasts_oi <- c("'F-M','M-F'")
+contrast_tbl <- tibble(contrast = c("F-M", "M-F"),
+                        group = c("F", "M"))
+
+min_cells = 10
+
+min_sample_prop = 0.50
+fraction_cutoff = 0.05
+
+#Only when you observe aberrant distributions we recommend redoing the analysis with the empirical p-values instead of the regular p-values. In our experience, this is only required for a limited number of datasets.
+empirical_pval = FALSE
+
+logFC_threshold = 0.50
+p_val_threshold = 0.05
+#if the smallest group >= 20 samples, we typically recommend using p_val_adj = TRUE. When the biological difference between the conditions is very large, we typically recommend increasing the logFC_threshold and/or using p_val_adj = TRUE.
+p_val_adj = FALSE
+
+top_n_target = 250
+cores_system = 8
+# use one core per receiver cell type
+n.cores = min(cores_system, union(senders_oi, receivers_oi) %>% length()) 
+```
+
+### Set prioritization parameters
+"We will set our preference for this dataset as follows - and recommend the user to use the same weights by default if they don’t have specific reasons to change some of the parameters"
+```{r eval=FALSE}
+prioritizing_weights_DE = c("de_ligand" = 1,
+                         "de_receptor" = 1)
+prioritizing_weights_activity = c("activity_scaled" = 2)
+
+prioritizing_weights_expression_specificity = c("exprs_ligand" = 2,
+                         "exprs_receptor" = 2)
+
+prioritizing_weights_expression_sufficiency = c("frac_exprs_ligand_receptor" = 1)
+
+prioritizing_weights_relative_abundance = c( "abund_sender" = 0,
+                         "abund_receiver" = 0)
+
+prioritizing_weights = c(prioritizing_weights_DE, 
+                         prioritizing_weights_activity, 
+                         prioritizing_weights_expression_specificity,
+                         prioritizing_weights_expression_sufficiency, 
+                         prioritizing_weights_relative_abundance)
+```
+
+```{r eval=TRUE}
+scenario = "regular"
+ligand_activity_down = FALSE
+```
+
+### Run CCC analysis
+```{r}
+#set cell type from here (cell_type or simp_cell_type)
+load("data/processed_data/guilliams_liver/multinichenet_output_allCellType_20240516.RData")
+
+#multinichenet_output = multi_nichenet_analysis(
+ # sce = sce, 
+  #celltype_id = celltype_id, sample_id = sample_id, group_id = group_id, 
+  #batches = batches, covariates = covariates, 
+  #lr_network = lr_network, ligand_target_matrix = ligand_target_matrix, 
+  #contrasts_oi = contrasts_oi, contrast_tbl = contrast_tbl, 
+  #senders_oi = senders_oi, receivers_oi = receivers_oi,
+  #min_cells = min_cells, 
+  #fraction_cutoff = fraction_cutoff, 
+  #min_sample_prop = min_sample_prop,
+  #scenario = scenario, 
+  #ligand_activity_down = ligand_activity_down,
+  #logFC_threshold = logFC_threshold, 
+  #p_val_threshold = p_val_threshold, 
+  #p_val_adj = p_val_adj, 
+  #empirical_pval = empirical_pval, 
+  #top_n_target = top_n_target, 
+  #n.cores = n.cores, 
+  #verbose = TRUE
+  #)
+```
+
+## Visualization of results
+### Circos plot of top-prioritized links
+top 50 predictions across all contrasts, senders, and receivers of interest.
+```{r fig.width=8, fig.height=8}
+prioritized_tbl_oi_all = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  top_n = 50, 
+  rank_per_group = FALSE
+  )
+
+prioritized_tbl_oi = 
+  multinichenet_output$prioritization_tables$group_prioritization_tbl %>%
+  filter(id %in% prioritized_tbl_oi_all$id) %>%
+  distinct(id, sender, receiver, ligand, receptor, group) %>% 
+  left_join(prioritized_tbl_oi_all)
+prioritized_tbl_oi$prioritization_score[is.na(prioritized_tbl_oi$prioritization_score)] = 0
+
+cell_types = union(prioritized_tbl_oi$sender %>% unique(), prioritized_tbl_oi$receiver %>% unique())
+x_order <- intersect(ct_order, cell_types)
+
+prioritized_tbl_oi$receivernum <- as.numeric(factor(prioritized_tbl_oi$receiver, levels = x_order))
+prioritized_tbl_oi$sendernum <- as.numeric(factor(prioritized_tbl_oi$sender, levels = x_order))
+
+senders_receivers = union(prioritized_tbl_oi$sender %>% unique(), prioritized_tbl_oi$receiver %>% unique()) %>% sort()
+
+colors_sender = RColorBrewer::brewer.pal(n = length(senders_receivers), name = 'Spectral') %>% magrittr::set_names(senders_receivers)
+colors_receiver = RColorBrewer::brewer.pal(n = length(senders_receivers), name = 'Spectral') %>% magrittr::set_names(senders_receivers)
+
+colors_sender = ct_colors
+colors_receiver = ct_colors
+
+circos_list = make_circos_group_comparison(prioritized_tbl_oi, colors_sender, colors_receiver)
+```
+
+### Differential L-R pairs
+Check the top 50 interactions specific for the Male group
+```{r fig.width=16, fig.height=16}
+group_oi = "M"
+
+#add senders_oi, receivers_oi when needed
+prioritized_tbl_oi_M_50 = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  50, 
+  groups_oi = group_oi)
+
+plot_oi = make_sample_lr_prod_activity_plots_Omnipath(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi_M_50 %>% inner_join(lr_network_all))
+plot_oi
+```
+
+Check the top 50 interactions specific for the Female group
+```{r fig.width=16, fig.height=16}
+group_oi = "F"
+
+#add senders_oi, receivers_oi when needed
+prioritized_tbl_oi_F_50 = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  50, 
+  groups_oi = group_oi)
+
+plot_oi = make_sample_lr_prod_activity_plots_Omnipath(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi_F_50 %>% inner_join(lr_network_all))
+plot_oi
+```
+
+### Target gene expression
+#### Male-receiver_Mono.mono.derived.cells
+```{r}
+group_oi = "M"
+receiver_oi = "Mono.mono.derived.cells"
+```
+
+```{r}
+lr_target_prior_cor_filtered = multinichenet_output$lr_target_prior_cor %>%
+  inner_join(
+    multinichenet_output$ligand_activities_targets_DEgenes$ligand_activities %>% 
+      distinct(ligand, target, direction_regulation, contrast)
+    ) %>% 
+  inner_join(contrast_tbl) %>% filter(group == group_oi, receiver == receiver_oi)
+
+lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "up") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson > 0.50 | spearman > 0.50))
+lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "down") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson < -0.50 | spearman < -0.50)) # downregulation -- negative correlation
+lr_target_prior_cor_filtered = bind_rows(
+  lr_target_prior_cor_filtered_up, 
+  lr_target_prior_cor_filtered_down)
+```
+
+```{r fig.width=20, fig.height=6}
+prioritized_tbl_oi = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  10, 
+  groups_oi = group_oi, 
+  receivers_oi = receiver_oi)
+
+lr_target_correlation_plot = make_lr_target_correlation_plot(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi,  
+  lr_target_prior_cor_filtered , 
+  multinichenet_output$grouping_tbl, 
+  multinichenet_output$celltype_info, 
+  receiver_oi,
+  plot_legend = FALSE)
+lr_target_correlation_plot$combined_plot
+```
+
+#### Male-receiver_cDC2s 
+```{r}
+group_oi = "M"
+receiver_oi = "cDC2s"
+```
+
+```{r}
+lr_target_prior_cor_filtered = multinichenet_output$lr_target_prior_cor %>%
+  inner_join(
+    multinichenet_output$ligand_activities_targets_DEgenes$ligand_activities %>% 
+      distinct(ligand, target, direction_regulation, contrast)
+    ) %>% 
+  inner_join(contrast_tbl) %>% filter(group == group_oi, receiver == receiver_oi)
+
+lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "up") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson > 0.50 | spearman > 0.50))
+lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "down") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson < -0.50 | spearman < -0.50)) # downregulation -- negative correlation
+lr_target_prior_cor_filtered = bind_rows(
+  lr_target_prior_cor_filtered_up, 
+  lr_target_prior_cor_filtered_down)
+```
+
+```{r fig.width=20, fig.height=6}
+prioritized_tbl_oi = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  10, 
+  groups_oi = group_oi, 
+  receivers_oi = receiver_oi)
+
+lr_target_correlation_plot = make_lr_target_correlation_plot(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi,  
+  lr_target_prior_cor_filtered , 
+  multinichenet_output$grouping_tbl, 
+  multinichenet_output$celltype_info, 
+  receiver_oi,
+  plot_legend = FALSE)
+lr_target_correlation_plot$combined_plot
+```
+
+#### Female-receiver_Macrophages 
+```{r}
+group_oi = "F"
+receiver_oi = "Macrophages"
+```
+
+```{r}
+lr_target_prior_cor_filtered = multinichenet_output$lr_target_prior_cor %>%
+  inner_join(
+    multinichenet_output$ligand_activities_targets_DEgenes$ligand_activities %>% 
+      distinct(ligand, target, direction_regulation, contrast)
+    ) %>% 
+  inner_join(contrast_tbl) %>% filter(group == group_oi, receiver == receiver_oi)
+
+lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "up") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson > 0.50 | spearman > 0.50))
+lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "down") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson < -0.50 | spearman < -0.50)) # downregulation -- negative correlation
+lr_target_prior_cor_filtered = bind_rows(
+  lr_target_prior_cor_filtered_up, 
+  lr_target_prior_cor_filtered_down)
+```
+
+```{r fig.width=20, fig.height=6}
+prioritized_tbl_oi = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  10, 
+  groups_oi = group_oi, 
+  receivers_oi = receiver_oi)
+
+lr_target_correlation_plot = make_lr_target_correlation_plot(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi,  
+  lr_target_prior_cor_filtered , 
+  multinichenet_output$grouping_tbl, 
+  multinichenet_output$celltype_info, 
+  receiver_oi,
+  plot_legend = FALSE)
+lr_target_correlation_plot$combined_plot
+```
+
+#### Female-receiver_cDC1s
+```{r}
+group_oi = "F"
+receiver_oi = "cDC1s"
+```
+
+```{r}
+lr_target_prior_cor_filtered = multinichenet_output$lr_target_prior_cor %>%
+  inner_join(
+    multinichenet_output$ligand_activities_targets_DEgenes$ligand_activities %>% 
+      distinct(ligand, target, direction_regulation, contrast)
+    ) %>% 
+  inner_join(contrast_tbl) %>% filter(group == group_oi, receiver == receiver_oi)
+
+lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "up") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson > 0.50 | spearman > 0.50))
+lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+  filter(direction_regulation == "down") %>% 
+  filter( (rank_of_target < top_n_target) & (pearson < -0.50 | spearman < -0.50)) # downregulation -- negative correlation
+lr_target_prior_cor_filtered = bind_rows(
+  lr_target_prior_cor_filtered_up, 
+  lr_target_prior_cor_filtered_down)
+```
+
+```{r fig.width=20, fig.height=6}
+prioritized_tbl_oi = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  10, 
+  groups_oi = group_oi, 
+  receivers_oi = receiver_oi)
+
+lr_target_correlation_plot = make_lr_target_correlation_plot(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi,  
+  lr_target_prior_cor_filtered , 
+  multinichenet_output$grouping_tbl, 
+  multinichenet_output$celltype_info, 
+  receiver_oi,
+  plot_legend = FALSE)
+lr_target_correlation_plot$combined_plot
+```
+
+### Intercellular regulatory network systems view
+links are ligand-target links (= gene regulatory links) and not ligand-receptor protein-protein interactions
+```{r}
+prioritized_tbl_oi = get_top_n_lr_pairs(
+  multinichenet_output$prioritization_tables, 
+  100, 
+  rank_per_group = FALSE)
+
+lr_target_prior_cor_filtered = 
+  multinichenet_output$prioritization_tables$group_prioritization_tbl$group %>% unique() %>% 
+  lapply(function(group_oi){
+    lr_target_prior_cor_filtered = multinichenet_output$lr_target_prior_cor %>%
+      inner_join(
+        multinichenet_output$ligand_activities_targets_DEgenes$ligand_activities %>%
+          distinct(ligand, target, direction_regulation, contrast)
+        ) %>% 
+      inner_join(contrast_tbl) %>% filter(group == group_oi)
+    
+    lr_target_prior_cor_filtered_up = lr_target_prior_cor_filtered %>% 
+      filter(direction_regulation == "up") %>% 
+      filter( (rank_of_target < top_n_target) & (pearson > 0.50 | spearman > 0.50))
+    
+    lr_target_prior_cor_filtered_down = lr_target_prior_cor_filtered %>% 
+      filter(direction_regulation == "down") %>% 
+      filter( (rank_of_target < top_n_target) & (pearson < -0.50 | spearman < -0.50))
+    lr_target_prior_cor_filtered = bind_rows(
+      lr_target_prior_cor_filtered_up, 
+      lr_target_prior_cor_filtered_down
+      )
+}) %>% bind_rows()
+
+lr_target_df = lr_target_prior_cor_filtered %>% 
+  distinct(group, sender, receiver, ligand, receptor, id, target, direction_regulation)
+```
+
+```{r fig.width=22, fig.height=10}
+network = infer_intercellular_regulatory_network(lr_target_df, prioritized_tbl_oi)
+network_graph = visualize_network(network, colors_sender)
+network_graph$plot
+```
+
+### Further prioritized wirh network
+```{r}
+prioritized_tbl_oi_network = prioritized_tbl_oi %>% inner_join(
+  network$prioritized_lr_interactions)
+```
+
+#### Differential L-R pairs
+for male group
+```{r fig.width=16, fig.height=12}
+group_oi = "M"
+
+prioritized_tbl_oi_M = prioritized_tbl_oi_network %>% filter(group == group_oi)
+
+plot_oi = make_sample_lr_prod_activity_plots_Omnipath(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi_M %>% inner_join(lr_network_all)
+  )
+plot_oi
+```
+
+for female group
+```{r fig.width=16, fig.height=12}
+group_oi = "F"
+
+prioritized_tbl_oi_M = prioritized_tbl_oi_network %>% filter(group == group_oi)
+
+plot_oi = make_sample_lr_prod_activity_plots_Omnipath(
+  multinichenet_output$prioritization_tables, 
+  prioritized_tbl_oi_M %>% inner_join(lr_network_all)
+  )
+plot_oi
+```
+
+# Save
+```{r}
+output_dir <- "data/processed_data/guilliams_liver/"
+date <- format(Sys.Date(), "%Y%m%d")
+```
+
+## Set output file
+```{r eval=FALSE}
+#set cell type from here (cell_type or simp_cell_type)
+save(multinichenet_output, file = file.path(output_dir, paste0("multinichenet_output_allCellType_", date, ".RData")))
+```
+
+# Notes
+```{r}
+sessionInfo()
+```
